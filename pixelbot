@@ -1,0 +1,135 @@
+#!/bin/bash
+#
+# PixelBot - AI Voice Dictation System
+# Production launcher script
+#
+# This script:
+# - Auto-starts TTS Docker container
+# - Sets up required environment variables
+# - Loads AI models (Whisper + Qwen2.5-3B)
+# - Launches the dictation daemon
+#
+# Hardware: Optimized for RTX 4070 12GB VRAM
+# VRAM Usage: ~7GB (40% safety margin)
+#
+
+# Terminal colors
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+# Get the installation directory (where this script lives)
+INSTALL_DIR="/home/wonka/Desktop/inProgressClaude/Dictation"
+
+# Change to installation directory
+cd "$INSTALL_DIR" || {
+    echo -e "${RED}Error: Installation directory not found: $INSTALL_DIR${NC}"
+    exit 1
+}
+
+# Print banner
+echo "================================================================================"
+echo "  PixelBot - AI Voice Dictation System"
+echo "================================================================================"
+echo ""
+
+# Check if virtual environment exists
+if [ ! -d "venv" ]; then
+    echo -e "${RED}Error: Virtual environment not found${NC}"
+    echo "Please run the installation script first"
+    exit 1
+fi
+
+# Check if .env file exists
+if [ ! -f ".env" ]; then
+    echo -e "${YELLOW}Warning: .env file not found${NC}"
+    echo "Create .env with your API keys:"
+    echo "  OPENAI_API_KEY=your_key_here    (for TTS)"
+    echo "  MORALIS_API_KEY=your_key_here   (for Cortex blockchain queries)"
+fi
+
+# Check and start TTS Docker container
+echo -e "${GREEN}[1/4]${NC} Checking TTS Docker container..."
+if ! docker ps | grep -q pda-voice; then
+    echo "  Starting PDA Voice TTS container..."
+
+    # Try to start existing container first
+    if docker start pda-voice 2>/dev/null; then
+        echo "  ✓ TTS container started"
+    else
+        # Container doesn't exist, try to run it
+        echo "  Creating new TTS container..."
+        if docker run -d -p 5000:5000 --name pda-voice subnautica-pda-voice 2>/dev/null; then
+            echo "  ✓ TTS container created"
+        else
+            echo -e "  ${YELLOW}⚠ TTS container not available${NC}"
+            echo "  Voice responses will be disabled"
+        fi
+    fi
+
+    # Wait for container to initialize
+    sleep 2
+else
+    echo "  ✓ TTS container already running"
+fi
+
+# Activate virtual environment
+echo -e "${GREEN}[2/4]${NC} Activating virtual environment..."
+source venv/bin/activate || {
+    echo -e "${RED}Error: Failed to activate virtual environment${NC}"
+    exit 1
+}
+echo "  ✓ Virtual environment activated"
+
+# Set up environment variables
+echo -e "${GREEN}[3/4]${NC} Setting up environment..."
+
+# cuDNN library paths (required for Whisper + PyTorch compatibility)
+CTRANSLATE2_LIBS="$INSTALL_DIR/venv/lib/python3.10/site-packages/ctranslate2.libs"
+NVIDIA_CUDNN="$INSTALL_DIR/venv/lib/python3.10/site-packages/nvidia/cudnn/lib"
+export LD_LIBRARY_PATH="$CTRANSLATE2_LIBS:$NVIDIA_CUDNN:$LD_LIBRARY_PATH"
+
+# Suppress unnecessary warnings
+export TOKENIZERS_PARALLELISM=false
+export TF_CPP_MIN_LOG_LEVEL=3
+
+echo "  ✓ Environment configured"
+
+# Send desktop notification that system is starting
+if command -v notify-send &> /dev/null; then
+    notify-send "PixelBot" "Loading AI models..." \
+        --icon=computer \
+        --urgency=normal \
+        --app-name="Voice Dictation" \
+        --expire-time=3000
+fi
+
+# Launch dictation daemon
+echo -e "${GREEN}[4/4]${NC} Launching dictation daemon..."
+echo ""
+echo "================================================================================"
+echo "  Models will auto-load on startup:"
+echo "    - Whisper base.en (0.5GB VRAM, CPU mode)"
+echo "    - Qwen2.5-3B-Instruct (6.5GB VRAM, GPU bfloat16)"
+echo "    - Total: ~7GB VRAM"
+echo ""
+echo "  Hotkeys:"
+echo "    F10 - Unmount/Remount models"
+echo "    F4  - START/STOP recording (push-to-talk)"
+echo ""
+echo "  Press Ctrl+C to exit"
+echo "================================================================================"
+echo ""
+
+# Run the daemon
+python dictation_daemon.py "$@"
+
+# Cleanup notification on exit
+if command -v notify-send &> /dev/null; then
+    notify-send "PixelBot" "System shutdown" \
+        --icon=dialog-information \
+        --urgency=low \
+        --app-name="Voice Dictation" \
+        --expire-time=2000
+fi
