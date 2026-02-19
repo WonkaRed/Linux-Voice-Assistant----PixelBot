@@ -1,0 +1,40 @@
+#!/bin/bash
+# Nova Voice Assistant Launcher
+# Run from project root: ./nova
+#
+# Modes:
+#   ./nova                   — GPU Node (connects to Nova Server via WebSocket)
+#   ./nova --standalone      — Standalone mode (old behavior, direct SSH to Pixel Bot)
+#   ./nova -q "message"      — Single-shot query (standalone mode)
+
+cd "$(dirname "$0")"
+
+# Activate venv
+if [ -f ".venv/bin/activate" ]; then
+    source .venv/bin/activate
+else
+    echo "Virtual environment not found!"
+    echo "Create with: python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt"
+    exit 1
+fi
+
+# Set CUDA library paths for cuDNN (required by faster-whisper/ctranslate2)
+NVIDIA_LIB_PATH="${PWD}/.venv/lib/python3.12/site-packages/nvidia"
+export LD_LIBRARY_PATH="${NVIDIA_LIB_PATH}/cudnn/lib:${NVIDIA_LIB_PATH}/cublas/lib:${LD_LIBRARY_PATH}"
+
+# Suppress ALSA/JACK warnings (benign audio subsystem noise)
+export JACK_NO_AUDIO_RESERVATION=1
+export JACK_NO_START_SERVER=1
+
+# Check if running in standalone mode
+if [[ "$*" == *"--standalone"* ]] || [[ "$*" == *"-q"* ]]; then
+    # Standalone: check SSH connectivity
+    if ! ssh -o ConnectTimeout=3 -o BatchMode=yes wonka@10.0.0.75 "echo pong" > /dev/null 2>&1; then
+        echo "WARNING: Pixel Bot unreachable at 10.0.0.75"
+        echo "Nova will start but AI responses won't work until server is reachable."
+    fi
+fi
+
+# Run Nova (node.py is the new entry point)
+cd src
+python -m nova.node "$@"

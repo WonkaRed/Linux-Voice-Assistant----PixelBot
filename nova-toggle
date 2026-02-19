@@ -1,0 +1,42 @@
+#!/bin/bash
+# Nova Voice Toggle - Send command to Nova via Unix socket
+#
+# Usage:
+#   nova-toggle         # Toggle voice recording (default)
+#   nova-toggle voice   # Toggle voice recording
+#   nova-toggle agent   # Toggle agent load/unload
+#   nova-toggle status  # Check if Nova is running
+#
+# Configure COSMIC to run this script on F4:
+#   Settings > Keyboard > Custom Shortcuts > Add
+#   Command: /home/wonka/Desktop/Projects/Dictation/nova-toggle
+#   Shortcut: F4
+
+SOCKET="/tmp/nova-voice.sock"
+COMMAND="${1:-toggle}"
+
+if [ ! -S "$SOCKET" ]; then
+    notify-send -t 2000 "Nova" "Not running" 2>/dev/null
+    exit 1
+fi
+
+# Send command to Nova
+RESPONSE=$(echo "$COMMAND" | nc -U -w 1 "$SOCKET" 2>/dev/null)
+
+if [ $? -eq 0 ]; then
+    # Success - show notification based on command
+    case "$COMMAND" in
+        toggle|voice|f4)
+            notify-send -t 1000 "Nova" "Voice toggled" 2>/dev/null
+            ;;
+        agent|load)
+            notify-send -t 1000 "Nova" "Agent toggled" 2>/dev/null
+            ;;
+        *)
+            echo "$RESPONSE"
+            ;;
+    esac
+else
+    notify-send -t 2000 "Nova" "Connection failed" 2>/dev/null
+    exit 1
+fi

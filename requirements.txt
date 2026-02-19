@@ -1,0 +1,36 @@
+# Nova Voice Assistant - Dependencies
+# Install: pip install -r requirements.txt
+
+# Core
+PyYAML>=6.0.0
+python-dotenv>=1.0.0
+
+# Voice - STT (Speech-to-Text)
+faster-whisper>=1.0.0
+librosa>=0.10.0
+PyAudio>=0.2.14
+soundfile>=0.12.0
+
+# Voice - TTS (Text-to-Speech)
+piper-tts>=1.2.0
+onnxruntime>=1.16.0
+
+# Tools
+psutil>=5.9.0
+pyperclip>=1.8.0
+
+# Input handling
+evdev>=1.6.0
+pynput>=1.7.0
+
+# Networking (Nova Server connection)
+websockets>=12.0
+
+# GPU monitoring (VRAM-submissive model management)
+pynvml>=11.5.0
+
+# CUDA support (for GPU acceleration)
+# These are installed automatically with faster-whisper[cuda]
+# but we list them explicitly for clarity
+nvidia-cudnn-cu12>=9.0.0
+nvidia-cublas-cu12>=12.0.0

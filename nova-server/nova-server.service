@@ -1,0 +1,14 @@
+[Unit]
+Description=Nova Voice Server
+After=network.target
+
+[Service]
+Type=simple
+User=wonka
+WorkingDirectory=/home/wonka/nova-server
+ExecStart=/home/wonka/nova-server/.venv/bin/python3 run.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
