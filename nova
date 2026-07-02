@@ -18,9 +18,14 @@ fi
 if [ -f ".venv/bin/activate" ]; then
   # shellcheck disable=SC1091
   . ".venv/bin/activate"
-  # cuDNN / cuBLAS libs bundled with the nvidia pip wheels (faster-whisper/CT2).
-  NVIDIA_LIB="$HERE/.venv/lib/python3.12/site-packages/nvidia"
-  export LD_LIBRARY_PATH="${NVIDIA_LIB}/cudnn/lib:${NVIDIA_LIB}/cublas/lib:${LD_LIBRARY_PATH:-}"
+fi
+
+# cuDNN / cuBLAS for faster-whisper / CTranslate2. Ask Python where the nvidia
+# wheels actually live (the venv uses --system-site-packages, so they're in the
+# user site, not under .venv). Robust to path/version changes.
+NVIDIA_DIR="$(python3 -c 'import os,nvidia; print(os.path.dirname(nvidia.__file__))' 2>/dev/null || true)"
+if [ -n "$NVIDIA_DIR" ]; then
+  export LD_LIBRARY_PATH="${NVIDIA_DIR}/cudnn/lib:${NVIDIA_DIR}/cublas/lib:${LD_LIBRARY_PATH:-}"
 fi
 
 # Quiet the benign ALSA/JACK startup noise.

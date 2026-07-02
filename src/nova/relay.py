@@ -75,13 +75,18 @@ class TelegramRelay:
 
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
-            self._client = TelegramClient(self._session, self._api_id, self._api_hash, loop=self._loop)
+            # No loop= kwarg: Telethon binds to the current loop we just set.
+            self._client = TelegramClient(self._session, self._api_id, self._api_hash)
 
             self._loop.run_until_complete(self._client.connect())
             if not self._loop.run_until_complete(self._client.is_user_authorized()):
-                raise RelayNotAuthorized(
+                # Disconnect cleanly before bailing so no background tasks dangle.
+                self._disconnect_on_loop()
+                self._start_error = RelayNotAuthorized(
                     "Telegram session not authorized. Run:  nova login"
                 )
+                self._ready.set()
+                return
             logger.info("Relay connected to Telegram")
             self._ready.set()
             self._loop.run_forever()
@@ -89,14 +94,41 @@ class TelegramRelay:
             self._start_error = e
             self._ready.set()
         finally:
+            # run_forever has returned (normal stop). Disconnect Telethon's
+            # background tasks while the loop can still run them, then close it.
             if self._client is not None and self._loop is not None:
+                self._disconnect_on_loop()
                 try:
-                    self._loop.run_until_complete(self._client.disconnect())
+                    self._loop.close()
                 except Exception:
                     pass
 
+    def _disconnect_on_loop(self) -> None:
+        """
+        Disconnect the client from within the loop thread.
+
+        Telethon's ``disconnect()`` runs synchronously (returns None) when the
+        loop isn't running, and returns a coroutine when it is — handle both.
+        """
+        try:
+            if not self._client.is_connected():
+                return
+            res = self._client.disconnect()
+            if asyncio.iscoroutine(res):
+                self._loop.run_until_complete(res)
+        except Exception:
+            pass
+
     def stop(self) -> None:
+        # Disconnect on the loop thread first (cancels the receiver/update
+        # tasks), then stop the loop so run_forever returns and _run finishes.
         if self._loop and self._loop.is_running():
+            try:
+                coro = self._client.disconnect()
+                if asyncio.iscoroutine(coro):
+                    asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout=5)
+            except Exception:
+                pass
             self._loop.call_soon_threadsafe(self._loop.stop)
         if self._thread:
             self._thread.join(timeout=5)
@@ -123,7 +155,11 @@ class TelegramRelay:
 
     async def _resolve(self, bot: str):
         if bot not in self._entity_cache:
-            self._entity_cache[bot] = await self._client.get_entity(bot)
+            # A numeric chat/user id must be passed as int; a str is treated as
+            # a username. "@name" and "t.me/..." stay as strings.
+            s = str(bot).strip()
+            target = int(s) if s.lstrip("-").isdigit() else bot
+            self._entity_cache[bot] = await self._client.get_entity(target)
         return self._entity_cache[bot]
 
     async def _ask(self, bot: str, text: str, timeout: float) -> str:

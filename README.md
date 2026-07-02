@@ -99,9 +99,13 @@ In the terminal you can also type `pixelbot: <text>` or `/voice jailbreak`.
 
 ## Requirements & known constraints
 
-- **GPU driver:** faster-whisper uses CUDA on the RTX 3090. If `nvidia-smi` reports
+- **GPU driver:** faster-whisper uses CUDA on the RTX 3090s. If `nvidia-smi` reports
   a *driver/library version mismatch*, CUDA is unavailable until a **reboot** and STT
   silently falls back to CPU (~1.5× real-time — correct but slow).
+- **VRAM contention:** both 3090s serve the `llama-heretic-q8` model (layer-split).
+  After a reboot, check `nvidia-smi` free VRAM — Whisper `large-v3` needs ~3 GB. If
+  there isn't headroom, set `voice.stt_device: cpu` in `~/.nova/config.yaml` (or use a
+  smaller model like `distil-large-v3`) so STT never competes with the heretic.
 - **Audio:** capture uses `arecord` (ALSA/PipeWire); playback uses `aplay`. No PortAudio.
 - **Telegram:** Nova logs in as your user account (a userbot). The session file
   `~/.nova/nova.session` is an auth credential — it is gitignored; never share it.
