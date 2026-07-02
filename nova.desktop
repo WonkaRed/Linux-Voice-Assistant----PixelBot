@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name=Nova AI Assistant
-Comment=Voice-activated AI assistant
-Exec=/home/wonka/Desktop/Projects/Dictation/nova --no-load
+Name=Nova Voice Bridge
+Comment=Push-to-talk voice bridge to the Hermes agents
+Exec=/home/wonka/Desktop/Projects/Archived/Dictation/nova
 Icon=audio-input-microphone
 Terminal=true
 Categories=Utility;

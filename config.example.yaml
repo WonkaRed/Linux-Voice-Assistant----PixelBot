@@ -1,0 +1,32 @@
+# Nova voice bridge — copy to ~/.nova/config.yaml and edit.
+# Only non-secret settings live here. Telegram api_id / api_hash are secrets and
+# are read from ~/.claude/secrets/clients/pixel-labs/telegram-user.env instead.
+
+telegram:
+  session: ~/.nova/nova.session   # Telethon user-session file (created by `nova login`)
+  user_id:                        # optional: your Telegram user id, for a startup sanity check
+
+agents:
+  # Keybind 1 (F4): Pixel Bot = server `default` Hermes profile (cloud inference).
+  pixelbot:
+    bot: "@PixelBot"              # run `nova setup` to confirm the exact @username / id
+    reply_timeout_s: 180
+
+  # Keybind 2 (F8): Jailbreak = server `jailbreak` profile (local qwen3.6-heretic-q8).
+  jailbreak:
+    bot: "@JailbreakBot"
+    reply_timeout_s: 150
+
+voice:
+  stt_model: large-v3            # best-accuracy faster-whisper model
+  stt_device: cuda               # auto-falls back to CPU if CUDA is unavailable
+  stt_compute_type: float16
+  tts_voice: ~/.nova/models/piper/en_US-ryan-high.onnx
+
+relay:
+  settle_s: 2.5                  # seconds of bot silence before we treat the answer as done
+  reply_mode: last              # `last` (final message) or `concat` (join split messages)
+
+keybinds:                        # only used by the evdev fallback; COSMIC drives nova-toggle
+  pixelbot: F4
+  jailbreak: F8

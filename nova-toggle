@@ -1,42 +1,36 @@
-#!/bin/bash
-# Nova Voice Toggle - Send command to Nova via Unix socket
-#
-# Usage:
-#   nova-toggle         # Toggle voice recording (default)
-#   nova-toggle voice   # Toggle voice recording
-#   nova-toggle agent   # Toggle agent load/unload
-#   nova-toggle status  # Check if Nova is running
-#
-# Configure COSMIC to run this script on F4:
-#   Settings > Keyboard > Custom Shortcuts > Add
-#   Command: /home/wonka/Desktop/Projects/Dictation/nova-toggle
-#   Shortcut: F4
+#!/usr/bin/env python3
+"""
+Toggle recording for an agent by poking the Nova Unix socket.
 
-SOCKET="/tmp/nova-voice.sock"
-COMMAND="${1:-toggle}"
+Bind in COSMIC → Settings → Keyboard → Custom Shortcuts:
+    F4  →  <repo>/nova-toggle pixelbot
+    F8  →  <repo>/nova-toggle jailbreak
+"""
+import os
+import socket
+import subprocess
+import sys
 
-if [ ! -S "$SOCKET" ]; then
-    notify-send -t 2000 "Nova" "Not running" 2>/dev/null
-    exit 1
-fi
+agent = sys.argv[1] if len(sys.argv) > 1 else "pixelbot"
+sock_path = os.environ.get("NOVA_SOCKET", "/tmp/nova-voice.sock")
 
-# Send command to Nova
-RESPONSE=$(echo "$COMMAND" | nc -U -w 1 "$SOCKET" 2>/dev/null)
 
-if [ $? -eq 0 ]; then
-    # Success - show notification based on command
-    case "$COMMAND" in
-        toggle|voice|f4)
-            notify-send -t 1000 "Nova" "Voice toggled" 2>/dev/null
-            ;;
-        agent|load)
-            notify-send -t 1000 "Nova" "Agent toggled" 2>/dev/null
-            ;;
-        *)
-            echo "$RESPONSE"
-            ;;
-    esac
-else
-    notify-send -t 2000 "Nova" "Connection failed" 2>/dev/null
-    exit 1
-fi
+def notify(msg):
+    try:
+        subprocess.Popen(["notify-send", "-t", "1500", "Nova", msg],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
+try:
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(2)
+    s.connect(sock_path)
+    s.sendall(agent.encode())
+    sys.stdout.write(s.recv(128).decode())
+    s.close()
+except Exception as e:
+    notify("Not running")
+    sys.stderr.write(f"nova-toggle: {e} (is `nova` running?)\n")
+    sys.exit(1)

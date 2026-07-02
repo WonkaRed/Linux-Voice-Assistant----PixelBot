@@ -1,10 +1,13 @@
 """
-Audio Capture — Microphone input management.
+Audio capture — microphone input via a subprocess recorder.
 
-Extracted from runner.py NovaVoice for clean separation.
+Records raw 16 kHz mono s16le PCM from the system audio server (arecord →
+parec → ffmpeg, whichever exists). No PortAudio dependency, which keeps the
+install free of system dev packages and works cleanly on PipeWire.
 """
 import logging
-import os
+import shutil
+import subprocess
 import threading
 from typing import Optional
 
@@ -12,129 +15,118 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Minimum recording duration in samples (0.5s at 16kHz)
-MIN_SAMPLES = 8000
+MIN_SAMPLES = 8000  # 0.5s at 16 kHz
+
+# Each builder yields a command that streams raw s16le mono PCM to stdout.
+_RECORDERS = [
+    ("arecord", lambda sr: ["arecord", "-q", "-f", "S16_LE", "-r", str(sr), "-c", "1", "-t", "raw"]),
+    ("parec", lambda sr: ["parec", f"--rate={sr}", "--channels=1", "--format=s16le"]),
+    ("ffmpeg", lambda sr: ["ffmpeg", "-hide_banner", "-loglevel", "error",
+                           "-f", "pulse", "-i", "default", "-ar", str(sr), "-ac", "1", "-f", "s16le", "-"]),
+]
 
 
 class AudioCapture:
-    """Microphone audio capture with PyAudio."""
-
-    def __init__(self, sample_rate: int = 16000, channels: int = 1,
-                 frames_per_buffer: int = 1024):
+    def __init__(self, sample_rate: int = 16000):
         self.sample_rate = sample_rate
-        self.channels = channels
-        self.frames_per_buffer = frames_per_buffer
-
-        self._pa = None
-        self._stream = None
+        self._proc: Optional[subprocess.Popen] = None
+        self._buf = bytearray()
+        self._reader: Optional[threading.Thread] = None
         self._listening = False
-        self._audio_buffer = []
         self._lock = threading.Lock()
+        self._cmd = self._pick_recorder()
+
+    def _pick_recorder(self):
+        for name, build in _RECORDERS:
+            if shutil.which(name):
+                logger.info("Audio recorder: %s", name)
+                return build(self.sample_rate)
+        raise RuntimeError("No audio recorder found (need arecord, parec, or ffmpeg)")
 
     @property
     def is_listening(self) -> bool:
         return self._listening
 
     def start(self) -> bool:
-        """Start recording. Returns True if successful."""
         with self._lock:
             if self._listening:
                 return True
-
             try:
-                import pyaudio
-
-                # Suppress ALSA/JACK warnings during PyAudio init
-                devnull = os.open(os.devnull, os.O_WRONLY)
-                old_stderr = os.dup(2)
-                os.dup2(devnull, 2)
-                try:
-                    self._pa = pyaudio.PyAudio()
-                finally:
-                    os.dup2(old_stderr, 2)
-                    os.close(devnull)
-                    os.close(old_stderr)
-
-                self._audio_buffer = []
-
-                def callback(in_data, frame_count, time_info, status):
-                    if self._listening:
-                        self._audio_buffer.append(
-                            np.frombuffer(in_data, dtype=np.float32)
-                        )
-                    return (None, pyaudio.paContinue)
-
-                self._stream = self._pa.open(
-                    format=pyaudio.paFloat32,
-                    channels=self.channels,
-                    rate=self.sample_rate,
-                    input=True,
-                    frames_per_buffer=self.frames_per_buffer,
-                    stream_callback=callback,
+                self._buf = bytearray()
+                self._proc = subprocess.Popen(
+                    self._cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0
                 )
-
                 self._listening = True
-                self._stream.start_stream()
+                self._reader = threading.Thread(target=self._read, name="audio-read", daemon=True)
+                self._reader.start()
                 logger.info("Audio capture started")
                 return True
-
             except Exception as e:
-                logger.error(f"Audio capture failed: {e}")
+                logger.error("Audio capture failed: %s", e)
                 self._cleanup()
                 return False
 
-    def stop(self) -> Optional[np.ndarray]:
-        """
-        Stop recording and return audio data.
+    def _read(self) -> None:
+        stream = self._proc.stdout if self._proc else None
+        if stream is None:
+            return
+        try:
+            while self._listening:
+                chunk = stream.read(4096)
+                if not chunk:
+                    break
+                with self._lock:
+                    self._buf.extend(chunk)
+        except Exception:
+            pass
 
-        Returns numpy array of float32 audio, or None if recording was too short.
-        """
+    def get_buffer_copy(self) -> Optional[np.ndarray]:
+        """Snapshot the audio so far without stopping (for streaming STT)."""
+        with self._lock:
+            if not self._buf:
+                return None
+            return self._to_float32(bytes(self._buf))
+
+    def stop(self) -> Optional[np.ndarray]:
+        """Stop and return float32 audio, or None if too short."""
         with self._lock:
             if not self._listening:
                 return None
-
             self._listening = False
+        self._terminate()
+        if self._reader:
+            self._reader.join(timeout=1)
+        with self._lock:
+            data = bytes(self._buf)
+            self._buf = bytearray()
 
-            if self._stream:
-                self._stream.stop_stream()
-                self._stream.close()
-                self._stream = None
+        audio = self._to_float32(data)
+        if len(audio) < MIN_SAMPLES:
+            logger.warning("Recording too short (%d samples)", len(audio))
+            return None
+        logger.info("Audio captured: %.1fs", len(audio) / self.sample_rate)
+        return audio
 
-            if self._pa:
-                self._pa.terminate()
-                self._pa = None
+    def _to_float32(self, data: bytes) -> np.ndarray:
+        if len(data) < 2:
+            return np.array([], dtype=np.float32)
+        if len(data) % 2:
+            data = data[:-1]  # drop a trailing half-sample
+        return np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
 
-            audio = (
-                np.concatenate(self._audio_buffer)
-                if self._audio_buffer
-                else np.array([], dtype=np.float32)
-            )
-            self._audio_buffer = []
-
-            if len(audio) < MIN_SAMPLES:
-                logger.warning(f"Recording too short ({len(audio)} samples)")
-                return None
-
-            duration = len(audio) / self.sample_rate
-            logger.info(f"Audio captured: {duration:.1f}s")
-            return audio
-
-    def _cleanup(self):
-        """Clean up PyAudio resources."""
-        if self._stream:
+    def _terminate(self) -> None:
+        if self._proc:
             try:
-                self._stream.stop_stream()
-                self._stream.close()
+                self._proc.terminate()
+                self._proc.wait(timeout=1)
             except Exception:
-                pass
-            self._stream = None
+                try:
+                    self._proc.kill()
+                except Exception:
+                    pass
+            self._proc = None
 
-        if self._pa:
-            try:
-                self._pa.terminate()
-            except Exception:
-                pass
-            self._pa = None
-
+    def _cleanup(self) -> None:
+        self._terminate()
         self._listening = False
-        self._audio_buffer = []
+        self._buf = bytearray()

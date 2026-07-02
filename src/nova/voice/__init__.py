@@ -1,14 +1,7 @@
-"""
-Nova Voice Module - Speech-to-Text and Text-to-Speech for Nova agent.
+"""Nova voice module — Whisper STT, Piper TTS, and microphone capture."""
 
-Features:
-- Piper TTS
-- Faster-Whisper STT for accurate speech recognition
-- Push-to-talk and continuous listening modes
-"""
-
-from .tts import TTSEngine
+from .audio import AudioCapture
 from .stt import STTEngine
-from .interface import VoiceInterface
+from .tts import TTSEngine
 
-__all__ = ["TTSEngine", "STTEngine", "VoiceInterface"]
+__all__ = ["AudioCapture", "STTEngine", "TTSEngine"]

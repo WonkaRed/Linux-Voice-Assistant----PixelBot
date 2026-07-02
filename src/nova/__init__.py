@@ -1,16 +1,3 @@
-"""
-Nova Voice Assistant — GPU Node + Server architecture.
+"""Nova — push-to-talk voice bridge to the Hermes agents on 10.0.0.75."""
 
-Desktop GPU Node:
-- Faster-whisper large-v3 STT (CUDA, float16)
-- Piper TTS (ryan-high)
-- VRAM-submissive model management
-- 4 local tools: system_stats, clipboard, timer, notes
-- WebSocket connection to Nova Server
-
-Nova Server (10.0.0.75):
-- Agent routing + Pixel Bot (LOCAL, no SSH)
-- Orchestrates voice queries
-"""
-
-__version__ = "2.0.0"
+__version__ = "3.0.0"

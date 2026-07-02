@@ -14,6 +14,10 @@ env/
 *.key
 *.pem
 
+# Telegram user session (an auth credential — never commit)
+*.session
+*.session-journal
+
 # Logs
 logs/
 *.log

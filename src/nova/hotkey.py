@@ -1,143 +1,40 @@
 """
-Hotkey Listeners — evdev keyboard + Unix socket IPC.
+Hotkey listeners — evdev keyboard + Unix-socket IPC.
 
-Extracted from runner.py for clean separation.
+Two agents, one key each (default F4 = pixelbot, F8 = jailbreak). On Wayland
+the compositor owns the function keys, so the primary path is the Unix socket:
+COSMIC runs `nova-toggle <agent>` which pokes the socket. evdev is a best-effort
+fallback for environments where we can read the keyboard directly.
 """
 import logging
 import os
 import socket
 import threading
-from typing import Callable, Optional
+from typing import Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-DEBUG = os.environ.get('NOVA_DEBUG', '').lower() in ('1', 'true', 'yes')
-SOCKET_PATH = os.environ.get('NOVA_SOCKET', '/tmp/nova-voice.sock')
-
-
-class HotkeyListener:
-    """Hotkey listener using evdev (works on X11, partial Wayland)."""
-
-    def __init__(self, on_f4: Callable, on_super_f4: Callable):
-        self.on_f4 = on_f4
-        self.on_super_f4 = on_super_f4
-        self._running = False
-        self._thread: Optional[threading.Thread] = None
-        self._device = None
-
-    def start(self) -> bool:
-        """Start listener. Returns True if successful."""
-        try:
-            import evdev
-            from evdev import ecodes
-
-            candidates = []
-            for path in evdev.list_devices():
-                try:
-                    dev = evdev.InputDevice(path)
-                    caps = dev.capabilities().get(ecodes.EV_KEY, [])
-                    has_f4 = ecodes.KEY_F4 in caps
-                    has_a = ecodes.KEY_A in caps
-                    name_lower = dev.name.lower()
-
-                    if not (has_f4 and has_a):
-                        continue
-
-                    if "viper" in name_lower or "mouse" in name_lower:
-                        continue
-
-                    score = 0
-                    if "ornata" in name_lower:
-                        score += 100
-                    if "keyboard" in name_lower:
-                        score += 10
-
-                    if score > 0:
-                        candidates.append((score, dev))
-                except Exception:
-                    pass
-
-            if not candidates:
-                logger.info("No keyboard found for hotkeys")
-                return False
-
-            candidates.sort(key=lambda x: x[0], reverse=True)
-            self._device = candidates[0][1]
-            logger.info(f"Selected keyboard: {self._device.name}")
-
-            self._running = True
-            self._thread = threading.Thread(target=self._loop, daemon=True)
-            self._thread.start()
-            return True
-
-        except PermissionError:
-            logger.error("No permission for hotkeys. Run: sudo usermod -aG input $USER")
-            return False
-        except Exception as e:
-            logger.error(f"Hotkey init failed: {e}")
-            return False
-
-    def _loop(self):
-        """Event loop."""
-        import select
-        from evdev import ecodes
-        super_pressed = False
-
-        try:
-            while self._running:
-                r, _, _ = select.select([self._device.fd], [], [], 0.5)
-                if not r:
-                    continue
-
-                for event in self._device.read():
-                    if not self._running:
-                        return
-                    if event.type != ecodes.EV_KEY:
-                        continue
-
-                    key = event.code
-                    pressed = event.value == 1
-
-                    if key in (ecodes.KEY_LEFTMETA, ecodes.KEY_RIGHTMETA):
-                        super_pressed = pressed
-                        continue
-
-                    if key == ecodes.KEY_F4 and pressed:
-                        if super_pressed:
-                            self.on_super_f4()
-                        else:
-                            self.on_f4()
-        except Exception as e:
-            if self._running:
-                logger.error(f"Hotkey error: {e}")
-
-    def stop(self):
-        """Stop listener."""
-        self._running = False
-        if self._device:
-            try:
-                self._device.close()
-            except Exception:
-                pass
+DEBUG = os.environ.get("NOVA_DEBUG", "").lower() in ("1", "true", "yes")
+SOCKET_PATH = os.environ.get("NOVA_SOCKET", "/tmp/nova-voice.sock")
 
 
 class SocketCommandListener:
     """
-    Listen for commands via Unix socket (Wayland-compatible).
+    Listen for toggle commands over a Unix socket (Wayland-compatible).
 
-    Commands: toggle, voice, agent, stop, status, ping
+    A command is an agent name (e.g. "pixelbot", "jailbreak") which toggles that
+    agent's recording, plus the control words "stop", "status", "ping".
     """
 
-    def __init__(self, on_toggle_voice: Callable, on_toggle_agent: Callable):
-        self.on_toggle_voice = on_toggle_voice
-        self.on_toggle_agent = on_toggle_agent
+    def __init__(self, on_toggle: Callable[[str], None], agents: list):
+        self.on_toggle = on_toggle
+        self.agents = set(agents)
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._socket: Optional[socket.socket] = None
         self._socket_path = SOCKET_PATH
 
     def start(self) -> bool:
-        """Start socket listener."""
         try:
             if os.path.exists(self._socket_path):
                 os.unlink(self._socket_path)
@@ -146,57 +43,49 @@ class SocketCommandListener:
             self._socket.bind(self._socket_path)
             self._socket.listen(5)
             self._socket.settimeout(0.5)
-            os.chmod(self._socket_path, 0o666)
+            os.chmod(self._socket_path, 0o600)
 
             self._running = True
-            self._thread = threading.Thread(target=self._loop, daemon=True)
+            self._thread = threading.Thread(target=self._loop, name="socket", daemon=True)
             self._thread.start()
-
-            logger.info(f"Socket listener: {self._socket_path}")
+            logger.info("Socket listener: %s", self._socket_path)
             return True
-
         except Exception as e:
-            logger.error(f"Socket listener failed: {e}")
+            logger.error("Socket listener failed: %s", e)
             return False
 
-    def _loop(self):
-        """Listen for commands."""
+    def _loop(self) -> None:
         while self._running:
             try:
                 conn, _ = self._socket.accept()
                 conn.settimeout(1.0)
-
                 try:
-                    data = conn.recv(256).decode('utf-8').strip().lower()
-
-                    if data in ('toggle', 'voice', 'f4'):
-                        self.on_toggle_voice()
-                        conn.sendall(b"OK: voice toggled\n")
-                    elif data in ('agent', 'load', 'super+f4'):
-                        self.on_toggle_agent()
-                        conn.sendall(b"OK: agent toggled\n")
-                    elif data == 'stop':
+                    data = conn.recv(256).decode("utf-8").strip().lower()
+                    if data in self.agents:
+                        self.on_toggle(data)
+                        conn.sendall(f"OK: {data} toggled\n".encode())
+                    elif data == "stop":
+                        self.on_toggle("__stop__")
                         conn.sendall(b"OK: stop\n")
-                    elif data == 'status':
+                    elif data == "status":
                         conn.sendall(b"OK: nova running\n")
-                    elif data == 'ping':
+                    elif data == "ping":
                         conn.sendall(b"pong\n")
                     else:
-                        conn.sendall(f"ERROR: unknown command '{data}'\n".encode())
-
+                        conn.sendall(
+                            f"ERROR: unknown command '{data}' (agents: {', '.join(sorted(self.agents))})\n".encode()
+                        )
                 except socket.timeout:
                     pass
                 finally:
                     conn.close()
-
             except socket.timeout:
                 continue
             except Exception as e:
                 if self._running and DEBUG:
-                    logger.warning(f"Socket error: {e}")
+                    logger.warning("Socket error: %s", e)
 
-    def stop(self):
-        """Stop listener."""
+    def stop(self) -> None:
         self._running = False
         if self._socket:
             try:
@@ -206,5 +95,92 @@ class SocketCommandListener:
         if os.path.exists(self._socket_path):
             try:
                 os.unlink(self._socket_path)
+            except Exception:
+                pass
+
+
+class HotkeyListener:
+    """evdev fallback: map keycodes to agent toggles (best-effort, X11/root)."""
+
+    def __init__(self, keymap: Dict[str, str], on_toggle: Callable[[str], None]):
+        # keymap: {"KEY_F4": "pixelbot", "KEY_F8": "jailbreak"}
+        self.keymap = keymap
+        self.on_toggle = on_toggle
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+        self._device = None
+
+    def start(self) -> bool:
+        try:
+            import evdev
+            from evdev import ecodes
+
+            wanted_codes = {getattr(ecodes, name) for name in self.keymap if hasattr(ecodes, name)}
+            candidates = []
+            for path in evdev.list_devices():
+                try:
+                    dev = evdev.InputDevice(path)
+                    caps = set(dev.capabilities().get(ecodes.EV_KEY, []))
+                    name_lower = dev.name.lower()
+                    if not wanted_codes.issubset(caps) or ecodes.KEY_A not in caps:
+                        continue
+                    if "mouse" in name_lower or "viper" in name_lower:
+                        continue
+                    score = (100 if "ornata" in name_lower else 0) + (10 if "keyboard" in name_lower else 0)
+                    if score:
+                        candidates.append((score, dev))
+                except Exception:
+                    pass
+
+            if not candidates:
+                logger.info("No keyboard found for evdev hotkeys")
+                return False
+
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            self._device = candidates[0][1]
+            logger.info("Selected keyboard: %s", self._device.name)
+
+            self._code_to_agent = {
+                getattr(ecodes, name): agent
+                for name, agent in self.keymap.items()
+                if hasattr(ecodes, name)
+            }
+            self._running = True
+            self._thread = threading.Thread(target=self._loop, name="evdev", daemon=True)
+            self._thread.start()
+            return True
+        except PermissionError:
+            logger.info("No permission for evdev hotkeys (normal on Wayland)")
+            return False
+        except Exception as e:
+            logger.info("evdev hotkeys unavailable: %s", e)
+            return False
+
+    def _loop(self) -> None:
+        import select
+        from evdev import ecodes
+
+        try:
+            while self._running:
+                r, _, _ = select.select([self._device.fd], [], [], 0.5)
+                if not r:
+                    continue
+                for event in self._device.read():
+                    if not self._running:
+                        return
+                    if event.type != ecodes.EV_KEY or event.value != 1:
+                        continue
+                    agent = self._code_to_agent.get(event.code)
+                    if agent:
+                        self.on_toggle(agent)
+        except Exception as e:
+            if self._running:
+                logger.error("Hotkey error: %s", e)
+
+    def stop(self) -> None:
+        self._running = False
+        if self._device:
+            try:
+                self._device.close()
             except Exception:
                 pass
