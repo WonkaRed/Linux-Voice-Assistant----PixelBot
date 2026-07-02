@@ -1,0 +1,22 @@
+[Unit]
+Description=Nova — voice bridge to the Hermes agents
+Documentation=file:///home/wonka/Desktop/Projects/Archived/Dictation/README.md
+# Wait for the audio stack; the graphical session gives us the mic/notify bus.
+After=pipewire.service pipewire-pulse.service graphical-session.target
+Wants=pipewire.service
+# Restart backoff so a persistent failure doesn't hot-loop.
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Desktop/Projects/Archived/Dictation
+ExecStart=%h/Desktop/Projects/Archived/Dictation/nova --daemon
+Restart=on-failure
+RestartSec=5
+# Never fight the heretic / model inference for CPU — Nova always yields.
+Nice=10
+CPUWeight=20
+
+[Install]
+WantedBy=default.target

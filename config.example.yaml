@@ -18,9 +18,10 @@ agents:
     reply_timeout_s: 150
 
 voice:
-  stt_model: large-v3            # best-accuracy faster-whisper model
-  stt_device: cuda               # auto-falls back to CPU if CUDA is unavailable
-  stt_compute_type: float16
+  stt_model: large-v3-turbo      # large-v3 accuracy at ~0.6x real-time on CPU
+  stt_device: cpu                # cpu = zero VRAM use; set to `cuda` for near-instant STT
+  stt_compute_type: int8         # int8 for cpu; use float16 with cuda
+  stt_cpu_threads: 0             # 0 = use all cores (big CPU-latency win)
   tts_voice: ~/.nova/models/piper/en_US-ryan-high.onnx
 
 relay:

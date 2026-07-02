@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
-# Install Nova as a login autostart entry.
+# Install Nova as a systemd --user service: auto-starts on login, self-restarts
+# on failure, survives reboots.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-AUTOSTART_DIR="$HOME/.config/autostart"
+UNIT_DIR="$HOME/.config/systemd/user"
 
-mkdir -p "$AUTOSTART_DIR"
-sed "s|^Exec=.*|Exec=$SCRIPT_DIR/nova|" "$SCRIPT_DIR/nova.desktop" > "$AUTOSTART_DIR/nova.desktop"
+mkdir -p "$UNIT_DIR"
+cp "$SCRIPT_DIR/nova.service" "$UNIT_DIR/nova.service"
+systemctl --user daemon-reload
+systemctl --user enable --now nova.service
 
-echo "Installed: $AUTOSTART_DIR/nova.desktop"
-echo "Nova will launch on login. Remove with: rm $AUTOSTART_DIR/nova.desktop"
+echo "Installed and started nova.service."
+echo "  status:  systemctl --user status nova.service"
+echo "  logs:    journalctl --user -u nova.service -f"
+echo "  stop:    systemctl --user stop nova.service"
+echo "  disable: systemctl --user disable --now nova.service"

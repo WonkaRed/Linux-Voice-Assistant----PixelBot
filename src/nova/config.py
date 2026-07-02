@@ -39,9 +39,12 @@ DEFAULTS: dict = {
         },
     },
     "voice": {
-        "stt_model": "large-v3",              # best-accuracy faster-whisper
-        "stt_device": "cuda",                 # falls back to CPU automatically
-        "stt_compute_type": "float16",
+        # turbo on CPU ≈ large-v3 accuracy at ~0.6× real-time, zero VRAM use —
+        # so STT never competes with the GPU model inference.
+        "stt_model": "large-v3-turbo",
+        "stt_device": "cpu",                  # cpu keeps us submissive to the GPUs
+        "stt_compute_type": "int8",           # int8 for cpu; float16 for cuda
+        "stt_cpu_threads": 0,                 # 0 = use all cores
         "tts_voice": str(CONFIG_DIR / "models" / "piper" / "en_US-ryan-high.onnx"),
     },
     # How the relay decides the bot has finished answering: after the first

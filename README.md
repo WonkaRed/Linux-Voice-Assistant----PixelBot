@@ -39,9 +39,24 @@ src/nova/
 ├── hotkey.py    # Unix-socket toggle (Wayland) + evdev fallback
 └── voice/
     ├── audio.py # microphone capture via arecord/parec/ffmpeg (no PortAudio)
-    ├── stt.py   # faster-whisper large-v3 (CUDA, CPU fallback)
+    ├── stt.py   # faster-whisper large-v3-turbo on CPU (int8, all cores)
     └── tts.py   # Piper (en_US-ryan-high)
 nova            # launcher      nova-toggle   # socket poke for COSMIC keybinds
+nova.service    # systemd --user unit (autostart, self-restart, reboot-proof)
+```
+
+## Runs as a service
+
+Nova runs as a `systemd --user` service — starts on login, restarts itself on
+failure, survives reboots, and is niced/CPU-weighted low so it always yields to
+the model inference. STT + TTS run on **CPU** (turbo ≈ large-v3 accuracy at
+~0.6× real-time, ~1.1 GB RAM, **zero VRAM**), so voice never competes with the
+dual-3090 heretic model.
+
+```bash
+./setup-autostart.sh                        # install + enable + start
+systemctl --user status nova.service        # check
+journalctl --user -u nova.service -f        # logs
 ```
 
 ## Setup
@@ -74,7 +89,12 @@ EOF
 
 # 6. Confirm the bot chat targets, then set them in ~/.nova/config.yaml
 ./nova setup     # lists your bot chats with @username and id
+
+# 7. Install as a service (autostart, self-restart, reboot-proof)
+./setup-autostart.sh
 ```
+
+(The Whisper `large-v3-turbo` model auto-downloads on first run — no manual step.)
 
 ### COSMIC keybinds
 
@@ -87,25 +107,30 @@ Settings → Keyboard → Custom Shortcuts → Add:
 
 ## Usage
 
-```bash
-./nova                          # run the bridge
-# press F4, speak, press F4 → Pixel Bot answers by voice
-# press F8, speak, press F8 → Jailbreak answers by voice
+Once installed as a service it's always running — just press the keys:
 
+- **F4** → speak → F4 → Pixel Bot answers by voice
+- **F8** → speak → F8 → Jailbreak answers by voice
+
+```bash
 ./nova ask pixelbot "what's on my calendar today"   # one-shot text → voice reply
+./nova                                               # foreground/interactive (stop the service first)
 ```
 
-In the terminal you can also type `pixelbot: <text>` or `/voice jailbreak`.
+Interactively you can also type `pixelbot: <text>` or `/voice jailbreak`.
 
 ## Requirements & known constraints
 
-- **GPU driver:** faster-whisper uses CUDA on the RTX 3090s. If `nvidia-smi` reports
-  a *driver/library version mismatch*, CUDA is unavailable until a **reboot** and STT
-  silently falls back to CPU (~1.5× real-time — correct but slow).
-- **VRAM contention:** both 3090s serve the `llama-heretic-q8` model (layer-split).
-  After a reboot, check `nvidia-smi` free VRAM — Whisper `large-v3` needs ~3 GB. If
-  there isn't headroom, set `voice.stt_device: cpu` in `~/.nova/config.yaml` (or use a
-  smaller model like `distil-large-v3`) so STT never competes with the heretic.
+- **STT/TTS run on CPU by default** (turbo int8, all cores; ~1.1 GB RAM, zero VRAM)
+  so voice never competes with the dual-3090 heretic model. The service is niced low
+  and yields CPU to everything else.
+- **Want near-instant STT on GPU?** Set `voice.stt_device: cuda` +
+  `voice.stt_compute_type: float16` in `~/.nova/config.yaml`. Only do this if
+  `nvidia-smi` shows ≳3 GB free VRAM — otherwise it fights the heretic. (Requires a
+  working driver; a *driver/library version mismatch* means CUDA is down until reboot.)
+- **Audio:** capture via `arecord` (ALSA/PipeWire), playback via `aplay`. No PortAudio.
+- **Telegram:** logs in as your user account. `~/.nova/nova.session` is an auth
+  credential — gitignored; never share it.
 - **Audio:** capture uses `arecord` (ALSA/PipeWire); playback uses `aplay`. No PortAudio.
 - **Telegram:** Nova logs in as your user account (a userbot). The session file
   `~/.nova/nova.session` is an auth credential — it is gitignored; never share it.

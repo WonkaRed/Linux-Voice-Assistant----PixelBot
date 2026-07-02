@@ -69,7 +69,7 @@ class VoiceBridge:
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------ run
-    def run(self):
+    def run(self, headless: bool = False):
         self._banner()
         self._load_models()
         self._connect_relay()
@@ -77,7 +77,26 @@ class VoiceBridge:
         if self.tts:
             self.tts.speak_async("Nova online.")
         self._running = True
-        self._input_loop()
+        if headless:
+            self._run_headless()
+        else:
+            self._input_loop()
+
+    def _run_headless(self):
+        """Service mode: no terminal — just keep the listeners alive."""
+        import signal
+        log("Running headless (service mode). Hotkeys via nova-toggle.", "ok")
+        stop = threading.Event()
+
+        def _on_signal(signum, _frame):
+            log(f"Signal {signum} received — shutting down", "warn")
+            stop.set()
+
+        signal.signal(signal.SIGTERM, _on_signal)
+        signal.signal(signal.SIGINT, _on_signal)
+        stop.wait()
+        self._running = False
+        self._cleanup()
 
     def _load_models(self, with_stt: bool = True):
         log("Loading voice models...")
@@ -89,9 +108,10 @@ class VoiceBridge:
                 from nova.voice.stt import STTEngine
                 from nova.voice.audio import AudioCapture
                 self.stt = STTEngine(
-                    model_size=self.config.get("voice.stt_model", "large-v3"),
-                    device=self.config.get("voice.stt_device", "cuda"),
-                    compute_type=self.config.get("voice.stt_compute_type", "float16"),
+                    model_size=self.config.get("voice.stt_model", "large-v3-turbo"),
+                    device=self.config.get("voice.stt_device", "cpu"),
+                    compute_type=self.config.get("voice.stt_compute_type", "int8"),
+                    cpu_threads=int(self.config.get("voice.stt_cpu_threads", 0)),
                 )
                 self.audio = AudioCapture()
             log("Voice models loaded", "ok")
@@ -359,6 +379,8 @@ def main():
     from nova.config import Config
 
     parser = argparse.ArgumentParser(description="Nova voice bridge to Hermes")
+    parser.add_argument("--daemon", action="store_true",
+                        help="Headless service mode (no terminal input loop)")
     sub = parser.add_subparsers(dest="cmd")
     sub.add_parser("login", help="One-time Telegram user login")
     sub.add_parser("setup", help="List bot chats to configure agents")
@@ -385,7 +407,9 @@ def main():
         time.sleep(0.5)
         return
 
-    VoiceBridge(config).run()
+    # Headless when asked, or when there's no terminal (i.e. run as a service).
+    headless = args.daemon or not sys.stdin.isatty()
+    VoiceBridge(config).run(headless=headless)
 
 
 if __name__ == "__main__":

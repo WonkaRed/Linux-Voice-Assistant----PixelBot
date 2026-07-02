@@ -21,21 +21,28 @@ class STTEngine:
 
     def __init__(
         self,
-        model_size: str = "small.en",
-        device: str = "cuda",
-        compute_type: str = "float16",
+        model_size: str = "large-v3-turbo",
+        device: str = "cpu",
+        compute_type: str = "int8",
+        cpu_threads: int = 0,
     ):
         """
         Initialize STT engine.
 
         Args:
-            model_size: Whisper model size (tiny.en, base.en, small.en, medium.en, large-v3)
+            model_size: Whisper model (e.g. large-v3-turbo, large-v3, medium.en)
             device: Device to use (cuda, cpu)
-            compute_type: Compute type (float16, int8, float32)
+            compute_type: Compute type (float16 for cuda; int8 for cpu)
+            cpu_threads: CPU threads (0 = use all cores). Matters a lot for
+                         CPU latency — the default 0 lets us pass all 16.
         """
         self.model_size = model_size
         self.device = device
         self.compute_type = compute_type
+        # 0 → let CTranslate2 use every core (CPU transcription is ~2× faster
+        # with all 16 threads vs the library's conservative default).
+        import os as _os
+        self.cpu_threads = cpu_threads or (_os.cpu_count() or 4)
         self.model = None
         self.sample_rate = 16000  # Whisper requires 16kHz
 
@@ -55,6 +62,7 @@ class STTEngine:
                     model_size_or_path=self.model_size,
                     device=self.device,
                     compute_type=self.compute_type,
+                    cpu_threads=self.cpu_threads,
                 )
 
                 # Verify CUDA transcription works (catches cuDNN issues early)
@@ -72,6 +80,7 @@ class STTEngine:
                         model_size_or_path=self.model_size,
                         device="cpu",
                         compute_type="int8",
+                        cpu_threads=self.cpu_threads,
                     )
                 else:
                     raise

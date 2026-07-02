@@ -7,7 +7,8 @@ from nova.config import Config, DEFAULTS, telegram_credentials
 
 def test_defaults_when_no_file(tmp_path):
     cfg = Config.load(tmp_path / "does-not-exist.yaml")
-    assert cfg.get("voice.stt_model") == "large-v3"
+    assert cfg.get("voice.stt_model") == "large-v3-turbo"
+    assert cfg.get("voice.stt_device") == "cpu"
     assert cfg.agent_names == ["pixelbot", "jailbreak"]
     assert cfg.get("relay.settle_s") == 2.5
 
