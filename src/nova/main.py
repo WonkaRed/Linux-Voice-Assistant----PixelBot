@@ -133,7 +133,9 @@ class VoiceBridge:
         log("Loading voice models...")
         try:
             from nova.voice.tts import TTSEngine
-            self.tts = TTSEngine(voice_model=self.config.expanduser("voice.tts_voice"))
+            from nova import voices
+            entry = voices.get(self.config.get("voice.selection")) or voices.get("piper:en_US-ryan-high")
+            self.tts = TTSEngine(entry)
 
             if with_stt:
                 from nova.voice.stt import STTEngine
@@ -482,6 +484,86 @@ def _setup_list_bots(config):
     asyncio.run(go())
 
 
+def _voice_picker(config):
+    """Interactive TTS voice browser/selector — `nova tts-model`."""
+    import subprocess as sp
+    from nova import voices
+    from nova.voice.synth import synth_to_wav
+    from nova.config import SELECTION_FILE
+
+    PHRASE = ("Pixel Bot online. All systems nominal. I'm detecting multiple "
+              "lifeforms in the region. How can I help you today?")
+    preview_dir = os.path.expanduser("~/.nova/voice_previews")
+    os.makedirs(preview_dir, exist_ok=True)
+    items = voices.VOICES
+    current = [config.get("voice.selection")]
+
+    def show():
+        cat = None
+        for i, v in enumerate(items):
+            if v["cat"] != cat:
+                cat = v["cat"]
+                print(f"\n{C.CYAN}== {cat} =={C.RESET}")
+            mark = f"{C.GREEN} ●{C.RESET}" if v["key"] == current[0] else "  "
+            print(f"{i:3}{mark} {C.BOLD}{v['key']:34}{C.RESET} {C.GRAY}{v.get('desc','')}{C.RESET}")
+        print(f"\n{C.GRAY}[number]=play   u <n>=use it   c=current   l=list   q=quit{C.RESET}")
+
+    def preview_path(v):
+        return os.path.join(preview_dir, v["key"].replace(":", "_").replace("/", "_") + ".wav")
+
+    def play(v):
+        path = preview_path(v)
+        if not os.path.exists(path):
+            print(f"  {C.GRAY}synthesizing {v['key']}...{C.RESET}", flush=True)
+            try:
+                synth_to_wav(v, PHRASE, path)
+            except Exception as e:
+                print(f"  {C.RED}synth failed: {e}{C.RESET}")
+                return
+        print(f"  {C.GREEN}▶ playing:{C.RESET} {v['key']}  {C.GRAY}({v.get('desc','')}){C.RESET}")
+        try:
+            sp.run(["aplay", "-q", path])
+        except KeyboardInterrupt:
+            print("  (skipped)")
+
+    print(f"{C.BOLD}Nova voice picker{C.RESET} — {len(items)} voices. Current: {C.GREEN}{current[0]}{C.RESET}")
+    show()
+    while True:
+        try:
+            raw = input(f"\n{C.GREEN}voice>{C.RESET} ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if not raw:
+            continue
+        if raw in ("q", "quit", "exit"):
+            break
+        if raw in ("l", "list"):
+            show()
+        elif raw in ("c", "current"):
+            print(f"  current: {current[0]}")
+        elif raw.split()[0] in ("u", "use"):
+            parts = raw.split()
+            if len(parts) == 2 and parts[1].isdigit() and int(parts[1]) < len(items):
+                v = items[int(parts[1])]
+                SELECTION_FILE.write_text(v["key"])
+                current[0] = v["key"]
+                print(f"  {C.GREEN}✓ voice set to {v['key']}{C.RESET}")
+                r = input("  restart nova.service now to apply? [y/N] ").strip().lower()
+                if r == "y":
+                    sp.run(["systemctl", "--user", "restart", "nova.service"])
+                    print("  restarted — it'll be live in ~20s.")
+                else:
+                    print("  will apply on next service restart.")
+            else:
+                print("  usage: u <number>")
+        elif raw.isdigit() and int(raw) < len(items):
+            play(items[int(raw)])
+        else:
+            print("  ? enter a number to play, 'u <n>' to select, or 'q'")
+    print("done.")
+
+
 def main():
     import argparse
     from nova.config import Config
@@ -492,6 +574,7 @@ def main():
     sub = parser.add_subparsers(dest="cmd")
     sub.add_parser("login", help="One-time Telegram user login")
     sub.add_parser("setup", help="List bot chats to configure agents")
+    sub.add_parser("tts-model", help="Browse and pick the TTS voice")
     ask = sub.add_parser("ask", help="One-shot: send text to an agent and print+speak the reply")
     ask.add_argument("agent")
     ask.add_argument("message", nargs="+")
@@ -504,6 +587,9 @@ def main():
         return
     if args.cmd == "setup":
         _setup_list_bots(config)
+        return
+    if args.cmd == "tts-model":
+        _voice_picker(config)
         return
     if args.cmd == "ask":
         bridge = VoiceBridge(config)

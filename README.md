@@ -68,11 +68,15 @@ cd ~/Desktop/Projects/Archived/Dictation
 uv venv --python 3.12 --system-site-packages .venv
 uv pip install --python .venv/bin/python -r requirements.txt
 
-# 2. Voice models  (Piper voice → ~/.nova/models/piper/, Whisper auto-downloads)
-mkdir -p ~/.nova/models/piper
+# 2. Voice models  (Whisper auto-downloads; Piper + Kokoro for TTS)
+mkdir -p ~/.nova/models/piper ~/.nova/models/kokoro
 BASE=https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high
 curl -fsSL -o ~/.nova/models/piper/en_US-ryan-high.onnx      $BASE/en_US-ryan-high.onnx
 curl -fsSL -o ~/.nova/models/piper/en_US-ryan-high.onnx.json $BASE/en_US-ryan-high.onnx.json
+# Kokoro (40+ voices) for `nova tts-model`
+KO=https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0
+curl -fsSL -o ~/.nova/models/kokoro/kokoro-v1.0.onnx $KO/kokoro-v1.0.onnx
+curl -fsSL -o ~/.nova/models/kokoro/voices-v1.0.bin  $KO/voices-v1.0.bin
 
 # 3. Config
 cp config.example.yaml ~/.nova/config.yaml   # then edit the bot @usernames if needed
@@ -121,8 +125,14 @@ into your next message.
 
 ```bash
 ./nova ask pixelbot "what's on my calendar today"   # one-shot text → voice reply
+./nova tts-model                                     # browse 40+ voices, preview, pick one
 ./nova                                               # foreground/interactive (stop the service first)
 ```
+
+**Voices:** `nova tts-model` is an interactive picker — type a number to hear a
+voice, `u <n>` to make it the active one (Kokoro + Piper voices, plus robot/
+character styles like GLaDOS-ish, HAL, Dalek, PDA). It restarts the service to
+apply.
 
 Interactively you can also type `pixelbot: <text>` or `/voice jailbreak`.
 

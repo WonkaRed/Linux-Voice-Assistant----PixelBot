@@ -15,6 +15,9 @@ import yaml
 
 CONFIG_DIR = Path(os.environ.get("NOVA_HOME", str(Path.home() / ".nova")))
 CONFIG_PATH = CONFIG_DIR / "config.yaml"
+# The `nova tts-model` picker writes the chosen voice key here (kept separate so
+# selecting a voice never rewrites/strips the user's commented config.yaml).
+SELECTION_FILE = CONFIG_DIR / "voice.selection"
 
 # Sensible defaults. Everything here can be overridden by ~/.nova/config.yaml.
 DEFAULTS: dict = {
@@ -39,6 +42,8 @@ DEFAULTS: dict = {
         },
     },
     "voice": {
+        # Active TTS voice — a key from nova.voices (set via `nova tts-model`).
+        "selection": "piper:en_US-ryan-high",
         # turbo on CPU ≈ large-v3 accuracy at ~0.6× real-time, zero VRAM use —
         # so STT never competes with the GPU model inference.
         "stt_model": "large-v3-turbo",
@@ -46,6 +51,7 @@ DEFAULTS: dict = {
         "stt_compute_type": "int8",           # int8 for cpu; float16 for cuda
         "stt_cpu_threads": 0,                 # 0 = use all cores
         "tts_voice": str(CONFIG_DIR / "models" / "piper" / "en_US-ryan-high.onnx"),
+        "tts_effect": None,                   # optional ffmpeg filter chain (robotic voice)
         # Streaming STT: commit finished speech at pauses while you talk, so the
         # post-stop wait is tiny. Tune silence_thresh up if a noisy mic never
         # "pauses"; down if it splits too eagerly.
@@ -90,7 +96,13 @@ class Config:
             if not isinstance(loaded, dict):
                 raise ValueError(f"{path} must be a YAML mapping, got {type(loaded).__name__}")
             user_data = loaded
-        return cls(_deep_merge(DEFAULTS, user_data))
+        merged = _deep_merge(DEFAULTS, user_data)
+        # The picker's selection file wins over config.yaml for the voice.
+        if SELECTION_FILE.exists():
+            sel = SELECTION_FILE.read_text().strip()
+            if sel:
+                merged.setdefault("voice", {})["selection"] = sel
+        return cls(merged)
 
     def get(self, dotted: str, default: Any = None) -> Any:
         node: Any = self._data

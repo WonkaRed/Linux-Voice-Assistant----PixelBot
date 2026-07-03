@@ -22,7 +22,9 @@ voice:
   stt_device: cpu                # cpu = zero VRAM use; set to `cuda` for near-instant STT
   stt_compute_type: int8         # int8 for cpu; use float16 with cuda
   stt_cpu_threads: 0             # 0 = use all cores (big CPU-latency win)
-  tts_voice: ~/.nova/models/piper/en_US-ryan-high.onnx
+  # TTS voice — a key from nova/voices.py. Pick interactively with `nova tts-model`
+  # (that writes ~/.nova/voice.selection, which overrides this).
+  selection: piper:en_US-ryan-high
 
 relay:
   settle_s: 2.5                  # seconds of bot silence before we treat the answer as done
