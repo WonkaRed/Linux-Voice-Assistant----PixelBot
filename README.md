@@ -112,6 +112,13 @@ Once installed as a service it's always running — just press the keys:
 - **F4** → speak → F4 → Pixel Bot answers by voice
 - **F8** → speak → F8 → Jailbreak answers by voice
 
+Talk as long as you like — up to a 12-minute safety cap (and even hitting the cap
+sends your **full** transcript). Long takes are transcribed in the background
+*while* you speak, so stopping returns the whole thing almost immediately. An
+ascending chime means "listening", a descending one means "captured/sending".
+The agent's spoken reply never plays while the mic is live, so it can't echo back
+into your next message.
+
 ```bash
 ./nova ask pixelbot "what's on my calendar today"   # one-shot text → voice reply
 ./nova                                               # foreground/interactive (stop the service first)

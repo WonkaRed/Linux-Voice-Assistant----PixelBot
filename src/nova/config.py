@@ -46,6 +46,8 @@ DEFAULTS: dict = {
         "stt_compute_type": "int8",           # int8 for cpu; float16 for cuda
         "stt_cpu_threads": 0,                 # 0 = use all cores
         "tts_voice": str(CONFIG_DIR / "models" / "piper" / "en_US-ryan-high.onnx"),
+        "stream_chunk_s": 15,                 # transcribe long takes in ~15s chunks while recording
+        "max_record_s": 720,                  # 12 min safety cap (still sends the full transcript)
     },
     # How the relay decides the bot has finished answering: after the first
     # reply arrives, keep collecting until this many seconds pass with no new

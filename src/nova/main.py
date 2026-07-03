@@ -2,28 +2,44 @@
 """
 Nova — push-to-talk voice bridge to the Hermes agents on 10.0.0.75.
 
-Press a key, speak, press again. Your words are transcribed locally (Whisper),
-sent to an agent's Telegram bot as you (so the agent's live gateway handles it
-in its canonical session), and the reply is spoken back here (Piper).
+Press a key, speak (as long as you like — up to ~12 min), press again. Your
+words are transcribed locally (Whisper), sent to an agent's Telegram bot as you
+(so the agent's live gateway handles it in its canonical session), and the reply
+is spoken back here (Piper).
 
   F4 → Pixel Bot   (server `default` profile, cloud inference)
   F8 → Jailbreak   (server `jailbreak` profile, local qwen3.6-heretic-q8)
 
-The desktop is a thin relay: STT in, agent text out, agent text in, TTS out.
-All agent work happens in Hermes.
+Design notes:
+- Long takes are transcribed in the background *while* you talk (see
+  streaming.py), so stopping returns the full transcript almost immediately.
+- TTS never plays while the mic is recording — that killed an echo loop where
+  the agent's spoken reply was picked up and re-sent as your next message.
 """
 import os
+import queue
 import sys
 import threading
 import time
 from datetime import datetime
+from pathlib import Path
+
+import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 DEBUG = os.environ.get("NOVA_DEBUG", "").lower() in ("1", "true", "yes")
 
-_SOUND_START = "/usr/share/sounds/freedesktop/stereo/device-added.oga"
-_SOUND_STOP = "/usr/share/sounds/freedesktop/stereo/complete.oga"
+_ASSETS = Path(__file__).resolve().parents[2] / "assets" / "sounds"
+
+
+def _sound(name, fallback):
+    p = _ASSETS / name
+    return str(p) if p.exists() else fallback
+
+
+_SOUND_START = _sound("start.wav", "/usr/share/sounds/freedesktop/stereo/device-added.oga")
+_SOUND_STOP = _sound("stop.wav", "/usr/share/sounds/freedesktop/stereo/complete.oga")
 
 
 class C:
@@ -63,20 +79,35 @@ class VoiceBridge:
         self.relay = None
         self.socket_listener = None
         self.hotkeys = None
+        self.streamer = None
 
         self._running = False
-        self._recording_agent = None   # None = idle, else agent currently recording
-        self._lock = threading.Lock()
+        self._recording_agent = None      # None = idle, else agent being recorded
+        self._lock = threading.Lock()     # guards toggle state transitions
+        self._stt_lock = threading.Lock() # serialises model access (poll vs finish)
+        self._rec_active = threading.Event()
+        self._poll_thread = None
+        self._rec_started = 0.0
+
+        # Speech is queued and only ever played when the mic is idle (anti-echo).
+        self._speech_q: "queue.Queue[str]" = queue.Queue()
+        self._speech_thread = None
+        self._speech_epoch = 0   # bumped on barge-in to drop in-flight speech
+
+        self._last_toggle = 0.0
+        self._debounce_s = 0.4
+        self._max_record_s = float(config.get("voice.max_record_s", 720))  # 12 min safety cap
+        self._chunk_s = float(config.get("voice.stream_chunk_s", 15))
 
     # ------------------------------------------------------------------ run
     def run(self, headless: bool = False):
         self._banner()
         self._load_models()
         self._connect_relay()
+        self._running = True            # must precede the speech worker
+        self._start_speech_worker()
         self._start_listeners()
-        if self.tts:
-            self.tts.speak_async("Nova online.")
-        self._running = True
+        self._speak("Nova online.")
         if headless:
             self._run_headless()
         else:
@@ -107,6 +138,7 @@ class VoiceBridge:
             if with_stt:
                 from nova.voice.stt import STTEngine
                 from nova.voice.audio import AudioCapture
+                from nova.streaming import StreamingTranscriber
                 self.stt = STTEngine(
                     model_size=self.config.get("voice.stt_model", "large-v3-turbo"),
                     device=self.config.get("voice.stt_device", "cpu"),
@@ -114,6 +146,7 @@ class VoiceBridge:
                     cpu_threads=int(self.config.get("voice.stt_cpu_threads", 0)),
                 )
                 self.audio = AudioCapture()
+                self.streamer = StreamingTranscriber(self.stt, chunk_s=self._chunk_s)
             log("Voice models loaded", "ok")
             notify("Nova", "Voice ready")
         except Exception as e:
@@ -172,9 +205,14 @@ class VoiceBridge:
                 if self._recording_agent:
                     self._stop_and_process()
                 return
+            # Debounce: ignore accidental double-fires (COSMIC key-repeat, etc.).
+            now = time.monotonic()
+            if now - self._last_toggle < self._debounce_s:
+                return
+            self._last_toggle = now
+
             if self._recording_agent:
-                # Already recording — stop and process against the ORIGINAL agent.
-                self._stop_and_process()
+                self._stop_and_process()   # stops against the ORIGINAL agent
             else:
                 self._start_listening(agent)
 
@@ -189,37 +227,64 @@ class VoiceBridge:
             log(str(e), "err")
             return
 
-        if self.tts:
-            self.tts.stop()  # barge-in: cut off any current speech
+        self._flush_speech()  # barge-in: drop queued/playing speech before we listen
         if not self.audio:
             from nova.voice.audio import AudioCapture
             self.audio = AudioCapture()
 
         if self.audio.start():
+            self.streamer.reset()
             self._recording_agent = agent
+            self._rec_started = time.monotonic()
+            self._rec_active.set()
+            self._poll_thread = threading.Thread(target=self._stream_poll_loop, daemon=True)
+            self._poll_thread.start()
             play_sound(_SOUND_START)
             log(f"Listening for {agent}... (press again to send)", "ok")
             notify("Nova", f"Listening → {agent}")
 
+    def _stream_poll_loop(self):
+        """Transcribe completed chunks while recording, so stop is near-instant."""
+        while self._rec_active.is_set():
+            time.sleep(1.5)
+            if not self._rec_active.is_set():
+                break
+            # Safety cap: end a runaway/very long take (still sends full text).
+            if time.monotonic() - self._rec_started > self._max_record_s:
+                log(f"Reached {self._max_record_s:.0f}s cap — auto-sending", "warn")
+                self._toggle("__stop__")
+                break
+            buf = self.audio.get_buffer_copy() if self.audio else None
+            with self._stt_lock:
+                if not self._rec_active.is_set():
+                    break
+                try:
+                    self.streamer.poll(buf)
+                except Exception as e:
+                    log(f"stream poll error: {e}", "warn")
+
     def _stop_and_process(self):
         agent = self._recording_agent
         self._recording_agent = None
+        self._rec_active.clear()
         play_sound(_SOUND_STOP)
-        audio = self.audio.stop() if self.audio else None
-        if audio is None:
-            log("Recording too short", "warn")
-            return
-        threading.Thread(target=self._process, args=(agent, audio), daemon=True).start()
+        final_audio = self.audio.stop() if self.audio else None
+        threading.Thread(target=self._process, args=(agent, final_audio), daemon=True).start()
 
-    def _process(self, agent, audio):
+    def _process(self, agent, final_audio):
+        # Let the streaming poll thread finish its current chunk first.
+        if self._poll_thread:
+            self._poll_thread.join(timeout=30)
         try:
+            buf = final_audio if final_audio is not None else np.array([], dtype=np.float32)
             start = time.time()
-            text, _ = self.stt.transcribe(audio)
+            with self._stt_lock:
+                text = self.streamer.finish(buf)
             if not text or not text.strip():
                 log("No speech detected", "warn")
                 self._speak("I didn't catch that.")
                 return
-            log(f"[{agent}] heard ({time.time()-start:.1f}s): {text}", "ok")
+            log(f"[{agent}] heard ({time.time()-start:.1f}s, {len(buf)/16000:.0f}s audio): {text}", "ok")
 
             if not self.relay or not self.relay.connected:
                 self._speak("The relay isn't connected. Run nova login.")
@@ -227,7 +292,7 @@ class VoiceBridge:
 
             bot = self.config.agent(agent)["bot"]
             timeout = float(self.config.agent(agent).get("reply_timeout_s", 180))
-            log(f"[{agent}] asking Pixel Bot..." if agent == "pixelbot" else f"[{agent}] asking...", "info")
+            log(f"[{agent}] asking...", "info")
             notify("Nova", f"{agent} is thinking…")
 
             reply = self.relay.ask(bot, text, timeout=timeout)
@@ -244,9 +309,45 @@ class VoiceBridge:
             log(f"[{agent}] error: {e}", "err")
             self._speak("Something went wrong reaching the agent.")
 
+    # ------------------------------------------------------------------ speech (anti-echo)
+    def _start_speech_worker(self):
+        self._speech_thread = threading.Thread(target=self._speech_worker, daemon=True)
+        self._speech_thread.start()
+
+    def _speech_worker(self):
+        """Play queued replies one at a time, never while the mic is recording."""
+        while self._running or not self._speech_q.empty():
+            try:
+                text = self._speech_q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                epoch = self._speech_epoch
+                # Hold until the mic is idle; abandon if a barge-in flush occurs.
+                while self._rec_active.is_set() and self._running and epoch == self._speech_epoch:
+                    time.sleep(0.1)
+                if self.tts and self._running and epoch == self._speech_epoch:
+                    self.tts.speak(text, blocking=True)
+            except Exception as e:
+                log(f"speech error: {e}", "warn")
+            finally:
+                self._speech_q.task_done()
+
     def _speak(self, text):
+        if text and text.strip():
+            self._speech_q.put(text.strip())
+
+    def _flush_speech(self):
+        """Drop queued speech and stop any current playback (for barge-in)."""
+        self._speech_epoch += 1   # invalidate any speech the worker is holding
+        try:
+            while True:
+                self._speech_q.get_nowait()
+                self._speech_q.task_done()
+        except queue.Empty:
+            pass
         if self.tts:
-            self.tts.speak_async(text)
+            self.tts.stop()
 
     # ------------------------------------------------------------------ terminal
     def _banner(self):
@@ -271,7 +372,6 @@ class VoiceBridge:
                 if line.startswith("/"):
                     self._handle_cmd(line)
                     continue
-                # "agent: message" sends text straight to that agent (no voice).
                 if ":" in line:
                     name, _, msg = line.partition(":")
                     name, msg = name.strip().lower(), msg.strip()
@@ -313,8 +413,10 @@ class VoiceBridge:
             log(f"Unknown: {cmd}", "warn")
 
     def _cleanup(self):
+        self._rec_active.clear()
+        self._running = False
         if self.tts:
-            self.tts.shutdown() if hasattr(self.tts, "shutdown") else self.tts.stop()
+            self.tts.stop()
         if self.socket_listener:
             self.socket_listener.stop()
         if self.hotkeys:
@@ -403,8 +505,14 @@ def main():
         if not bridge.relay:
             sys.exit(1)
         bridge._load_models(with_stt=False)  # text-only path needs just TTS
+        bridge._running = True
+        bridge._start_speech_worker()
         bridge._send_text(args.agent, " ".join(args.message))
-        time.sleep(0.5)
+        # wait for the reply to finish speaking
+        for _ in range(1200):
+            if bridge._speech_q.empty() and not (bridge.tts and bridge.tts.is_speaking()):
+                break
+            time.sleep(0.1)
         return
 
     # Headless when asked, or when there's no terminal (i.e. run as a service).
