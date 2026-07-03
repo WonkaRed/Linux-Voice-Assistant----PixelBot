@@ -33,14 +33,16 @@ racing a second agent runner. The reply is spoken here and also visible in Teleg
 
 ```
 src/nova/
-├── main.py      # orchestrator: hotkeys → STT → relay → TTS, + login/setup/ask
-├── config.py    # ~/.nova/config.yaml loader; Telegram creds from env
-├── relay.py     # Telethon user-client: send to a bot, read the reply
-├── hotkey.py    # Unix-socket toggle (Wayland) + evdev fallback
+├── main.py       # orchestrator: hotkeys → STT → relay → per-agent TTS, + login/setup/ask/tts-model
+├── config.py     # ~/.nova/config.yaml loader; per-agent voice selection; Telegram creds from env
+├── relay.py      # Telethon user-client: send to a bot, read the reply
+├── hotkey.py     # Unix-socket toggle (Wayland) + evdev fallback
+├── voices.py     # voice catalog: Kokoro/Piper voices + real character models + robot effect styles
 └── voice/
-    ├── audio.py # microphone capture via arecord/parec/ffmpeg (no PortAudio)
-    ├── stt.py   # faster-whisper large-v3-turbo on CPU (int8, all cores)
-    └── tts.py   # Piper (en_US-ryan-high)
+    ├── audio.py  # microphone capture via arecord/parec/ffmpeg (no PortAudio)
+    ├── stt.py    # faster-whisper large-v3-turbo on CPU (int8, all cores)
+    ├── synth.py  # dispatches synthesis by engine: kokoro/piper/glados/xvasynth/rvc
+    └── tts.py    # playback (interruptible) over synth.py
 nova            # launcher      nova-toggle   # socket poke for COSMIC keybinds
 nova.service    # systemd --user unit (autostart, self-restart, reboot-proof)
 ```
@@ -125,27 +127,49 @@ into your next message.
 
 ```bash
 ./nova ask pixelbot "what's on my calendar today"   # one-shot text → voice reply
-./nova tts-model                                     # browse 70+ voices, preview, pick one
+./nova tts-model pixelbot                            # browse voices, pick pixelbot's
+./nova tts-model jailbreak                           # ...or jailbreak's
+./nova tts-model                                     # browse-only, no agent argument to set
 ./nova                                               # foreground/interactive (stop the service first)
 ```
 
-**Voices:** `nova tts-model` is an interactive picker — type a number to hear a
-voice, `u <n>` to make it the active one. 70 voices: Kokoro + Piper natural
-voices, plus 22 robot/character styles (GLaDOS, HAL 9000, JARVIS, EDI, Cortana,
-Terminator, C-3PO, Portal turret, Dalek, Cylon, classic DECtalk-style computer,
-PDA, and more). It restarts the service to apply.
-
 Interactively you can also type `pixelbot: <text>` or `/voice jailbreak`.
+
+## Voices
+
+Each agent has its **own** voice, set in `agents.<name>.voice` (or via
+`nova tts-model <agent>` → `u <n>`, which writes `~/.nova/voice.selection.<agent>`
+and overrides config.yaml). Defaults:
+
+| Agent | Voice | Engine |
+|-------|-------|--------|
+| Pixel Bot (F4) | **No Man's Sky exosuit AI** — the genuine xVASynth voice model | `real:nms_suit` |
+| Jailbreak (F8) | **HAL 9000** — genuine RVC v2 model trained on Douglas Rain's film dialogue | `real:hal9000` |
+
+These are real trained models, not effects on a generic voice — pulled from
+their original sources (see the commit history for exactly where). A third
+real model, GLaDOS (Forward Tacotron+HiFiGAN, the actual Portal checkpoint),
+is also in the catalog as `real:glados` if you want to switch either agent to it.
+
+`nova tts-model <agent>` also has 70 other voices to browse: natural Kokoro/Piper
+voices plus ffmpeg-effect robot styles (JARVIS-ish, EDI-ish, Cortana-ish,
+Terminator-ish, etc. — approximations, not trained models).
+
+Each real-model engine (`~/.nova/glados/`, `~/.nova/xvasynth/`, `~/.nova/rvc/`) is
+self-contained with its own venv. HAL 9000 (RVC) runs behind a persistent
+background server (`~/.nova/rvc/rvc_server.py`, auto-started on first use,
+listens on `/tmp/nova-rvc.sock`) so replies come back in a few seconds instead
+of reloading its ~350 MB of weights on every line.
 
 ## Requirements & known constraints
 
-- **STT/TTS run on CPU by default** (turbo int8, all cores; ~1.1 GB RAM, zero VRAM)
-  so voice never competes with the dual-3090 heretic model. The service is niced low
-  and yields CPU to everything else.
-- **Want near-instant STT on GPU?** Set `voice.stt_device: cuda` +
-  `voice.stt_compute_type: float16` in `~/.nova/config.yaml`. Only do this if
-  `nvidia-smi` shows ≳3 GB free VRAM — otherwise it fights the heretic. (Requires a
-  working driver; a *driver/library version mismatch* means CUDA is down until reboot.)
+- **Nova never touches the GPU — by hard requirement, not just default.** STT
+  (turbo int8, all cores, ~1.1 GB RAM) and every TTS engine (Kokoro, Piper,
+  GLaDOS, xVASynth, RVC) run CPU-only. The RVC and xVASynth/GLaDOS venvs use
+  CPU-only torch builds specifically so this holds even if a config value were
+  changed by mistake — the GPUs are reserved entirely for model inference
+  (the dual-3090 heretic). Do not set `voice.stt_device: cuda` or point any
+  voice engine at `cuda`/`gpu`.
 - **Audio:** capture via `arecord` (ALSA/PipeWire), playback via `aplay`. No PortAudio.
 - **Telegram:** logs in as your user account (a userbot). `~/.nova/nova.session` is
   an auth credential — gitignored; never share it.
