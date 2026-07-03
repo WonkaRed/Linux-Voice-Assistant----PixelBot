@@ -87,8 +87,16 @@ VOICES = [
     {"key": "piper:en_US-sam-medium", "engine": "piper", "voice": "en_US-sam-medium", "cat": "Piper", "desc": "male US"},
     {"key": "piper:en_GB-alan-medium", "engine": "piper", "voice": "en_GB-alan-medium", "cat": "Piper", "desc": "male GB"},
     {"key": "piper:en_GB-northern_english_male-medium", "engine": "piper", "voice": "en_GB-northern_english_male-medium", "cat": "Piper", "desc": "male GB, Northern"},
+    # ---------------- Real character models (actual trained voice, not an effect) ----------------
+    {"key": "real:glados", "engine": "glados", "cat": "Real model", "desc": "GLaDOS — genuine Portal model (Forward Tacotron+HiFiGAN, trained on Ellen McLain). Fast, ~1s."},
+    {"key": "real:nms_suit", "engine": "xvasynth", "ckpt": "resources/app/models/other/x_nomansskysuit.pt",
+     "cat": "Real model", "desc": "No Man's Sky exosuit AI — genuine xVASynth model. Fast, ~5-7s."},
+    {"key": "real:hal9000", "engine": "rvc", "model_pth": "characters/hal9000/hal_rvc.pth",
+     "index_path": "characters/hal9000/added_IVF256_Flat_nprobe_1_hal_rvc_v2.index",
+     "rvc_base_voice": "am_onyx", "rvc_base_speed": 0.92,
+     "cat": "Real model", "desc": "HAL 9000 — genuine RVC v2 model trained on Douglas Rain's film dialogue. SLOW on CPU (~1-6 min/line) — best for occasional use, not fast back-and-forth."},
     # ---------------- Robot / character (effect on a base voice) ----------------
-    {"key": "robot:glados", **_kok("bf_emma", "en-gb", effect=_GLADOS), "cat": "Robot", "desc": "GLaDOS-style (F)"},
+    {"key": "robot:glados_fx", **_kok("bf_emma", "en-gb", effect=_GLADOS), "cat": "Robot", "desc": "GLaDOS-style, effect-only (F) — prefer real:glados"},
     {"key": "robot:pda_emma", **_kok("bf_emma", "en-gb", effect=_PDA), "cat": "Robot", "desc": "Subnautica-PDA-style (F)"},
     {"key": "robot:pda_alice", **_kok("bf_alice", "en-gb", effect=_PDA), "cat": "Robot", "desc": "PDA-style, clearer (F)"},
     {"key": "robot:comms_ai", **_kok("af_nicole", effect=_COMMS), "cat": "Robot", "desc": "radio/comms AI (F)"},

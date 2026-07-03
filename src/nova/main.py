@@ -74,7 +74,7 @@ class VoiceBridge:
     def __init__(self, config):
         self.config = config
         self.stt = None
-        self.tts = None
+        self.tts_engines = {}   # agent name -> TTSEngine (own voice per agent)
         self.audio = None
         self.relay = None
         self.socket_listener = None
@@ -89,8 +89,9 @@ class VoiceBridge:
         self._poll_thread = None
         self._rec_started = 0.0
 
-        # Speech is queued and only ever played when the mic is idle (anti-echo).
-        self._speech_q: "queue.Queue[str]" = queue.Queue()
+        # Speech is queued (agent, text) and only ever played when the mic is
+        # idle (anti-echo); each agent speaks in its own configured voice.
+        self._speech_q: "queue.Queue[tuple[str, str]]" = queue.Queue()
         self._speech_thread = None
         self._speech_epoch = 0   # bumped on barge-in to drop in-flight speech
 
@@ -107,7 +108,7 @@ class VoiceBridge:
         self._running = True            # must precede the speech worker
         self._start_speech_worker()
         self._start_listeners()
-        self._speak("Nova online.")
+        self._speak(self.config.agent_names[0] if self.config.agent_names else None, "Nova online.")
         if headless:
             self._run_headless()
         else:
@@ -134,8 +135,14 @@ class VoiceBridge:
         try:
             from nova.voice.tts import TTSEngine
             from nova import voices
-            entry = voices.get(self.config.get("voice.selection")) or voices.get("piper:en_US-ryan-high")
-            self.tts = TTSEngine(entry)
+            fallback = voices.get("piper:en_US-ryan-high")
+            for agent in self.config.agent_names:
+                key = self.config.voice_for(agent)
+                entry = voices.get(key) or fallback
+                if entry is fallback and key != fallback["key"]:
+                    log(f"[{agent}] unknown voice '{key}', falling back to {fallback['key']}", "warn")
+                self.tts_engines[agent] = TTSEngine(entry)
+                log(f"[{agent}] voice: {entry['key']}", "info")
 
             if with_stt:
                 from nova.voice.stt import STTEngine
@@ -290,12 +297,12 @@ class VoiceBridge:
                 text = self.streamer.finish(buf)
             if not text or not text.strip():
                 log("No speech detected", "warn")
-                self._speak("I didn't catch that.")
+                self._speak(agent, "I didn't catch that.")
                 return
             log(f"[{agent}] heard ({time.time()-start:.1f}s, {len(buf)/16000:.0f}s audio): {text}", "ok")
 
             if not self.relay or not self.relay.connected:
-                self._speak("The relay isn't connected. Run nova login.")
+                self._speak(agent, "The relay isn't connected. Run nova login.")
                 return
 
             bot = self.config.agent(agent)["bot"]
@@ -306,16 +313,16 @@ class VoiceBridge:
             reply = self.relay.ask(bot, text, timeout=timeout)
             if reply and reply.strip():
                 log(f"[{agent}] reply: {reply[:200]}", "ok")
-                self._speak(reply)
+                self._speak(agent, reply)
             else:
                 log(f"[{agent}] empty reply", "warn")
-                self._speak("No answer came back.")
+                self._speak(agent, "No answer came back.")
         except TimeoutError:
             log(f"[{agent}] timed out", "err")
-            self._speak(f"{agent} took too long to answer.")
+            self._speak(agent, f"{agent} took too long to answer.")
         except Exception as e:
             log(f"[{agent}] error: {e}", "err")
-            self._speak("Something went wrong reaching the agent.")
+            self._speak(agent, "Something went wrong reaching the agent.")
 
     # ------------------------------------------------------------------ speech (anti-echo)
     def _start_speech_worker(self):
@@ -326,7 +333,7 @@ class VoiceBridge:
         """Play queued replies one at a time, never while the mic is recording."""
         while self._running or not self._speech_q.empty():
             try:
-                text = self._speech_q.get(timeout=0.5)
+                agent, text = self._speech_q.get(timeout=0.5)
             except queue.Empty:
                 continue
             try:
@@ -334,16 +341,17 @@ class VoiceBridge:
                 # Hold until the mic is idle; abandon if a barge-in flush occurs.
                 while self._rec_active.is_set() and self._running and epoch == self._speech_epoch:
                     time.sleep(0.1)
-                if self.tts and self._running and epoch == self._speech_epoch:
-                    self.tts.speak(text, blocking=True)
+                tts = self.tts_engines.get(agent)
+                if tts and self._running and epoch == self._speech_epoch:
+                    tts.speak(text, blocking=True)
             except Exception as e:
-                log(f"speech error: {e}", "warn")
+                log(f"speech error ({agent}): {e}", "warn")
             finally:
                 self._speech_q.task_done()
 
-    def _speak(self, text):
+    def _speak(self, agent, text):
         if text and text.strip():
-            self._speech_q.put(text.strip())
+            self._speech_q.put((agent, text.strip()))
 
     def _flush_speech(self):
         """Drop queued speech and stop any current playback (for barge-in)."""
@@ -354,8 +362,8 @@ class VoiceBridge:
                 self._speech_q.task_done()
         except queue.Empty:
             pass
-        if self.tts:
-            self.tts.stop()
+        for tts in self.tts_engines.values():
+            tts.stop()
 
     # ------------------------------------------------------------------ terminal
     def _banner(self):
@@ -402,7 +410,7 @@ class VoiceBridge:
             log(f"[{agent}] sending...", "info")
             reply = self.relay.ask(bot, msg, timeout=timeout)
             log(f"[{agent}] reply: {reply[:200]}", "ok")
-            self._speak(reply)
+            self._speak(agent, reply)
         except Exception as e:
             log(f"[{agent}] error: {e}", "err")
 
@@ -423,8 +431,8 @@ class VoiceBridge:
     def _cleanup(self):
         self._rec_active.clear()
         self._running = False
-        if self.tts:
-            self.tts.stop()
+        for tts in self.tts_engines.values():
+            tts.stop()
         if self.socket_listener:
             self.socket_listener.stop()
         if self.hotkeys:
@@ -484,19 +492,23 @@ def _setup_list_bots(config):
     asyncio.run(go())
 
 
-def _voice_picker(config):
-    """Interactive TTS voice browser/selector — `nova tts-model`."""
+def _voice_picker(config, agent=None):
+    """Interactive TTS voice browser/selector — `nova tts-model [agent]`."""
     import subprocess as sp
     from nova import voices
     from nova.voice.synth import synth_to_wav
-    from nova.config import SELECTION_FILE
+    from nova.config import selection_file
+
+    if agent and agent not in config.agent_names:
+        print(f"Unknown agent '{agent}'. Configured agents: {', '.join(config.agent_names)}")
+        return
 
     PHRASE = ("Pixel Bot online. All systems nominal. I'm detecting multiple "
               "lifeforms in the region. How can I help you today?")
     preview_dir = os.path.expanduser("~/.nova/voice_previews")
     os.makedirs(preview_dir, exist_ok=True)
     items = voices.VOICES
-    current = [config.get("voice.selection")]
+    current = [config.voice_for(agent) if agent else None]
 
     def show():
         cat = None
@@ -526,7 +538,10 @@ def _voice_picker(config):
         except KeyboardInterrupt:
             print("  (skipped)")
 
-    print(f"{C.BOLD}Nova voice picker{C.RESET} — {len(items)} voices. Current: {C.GREEN}{current[0]}{C.RESET}")
+    target = f" for {C.BOLD}{agent}{C.RESET}" if agent else " (browse-only — pass an agent to select, e.g. `nova tts-model pixelbot`)"
+    print(f"{C.BOLD}Nova voice picker{C.RESET}{target} — {len(items)} voices.")
+    if agent:
+        print(f"Current: {C.GREEN}{current[0]}{C.RESET}")
     show()
     while True:
         try:
@@ -541,14 +556,17 @@ def _voice_picker(config):
         if raw in ("l", "list"):
             show()
         elif raw in ("c", "current"):
-            print(f"  current: {current[0]}")
+            print(f"  current: {current[0] or '(no agent selected — pass one on the command line)'}")
         elif raw.split()[0] in ("u", "use"):
+            if not agent:
+                print(f"  {C.RED}no agent selected — run `nova tts-model <agent>` instead{C.RESET}")
+                continue
             parts = raw.split()
             if len(parts) == 2 and parts[1].isdigit() and int(parts[1]) < len(items):
                 v = items[int(parts[1])]
-                SELECTION_FILE.write_text(v["key"])
+                selection_file(agent).write_text(v["key"])
                 current[0] = v["key"]
-                print(f"  {C.GREEN}✓ voice set to {v['key']}{C.RESET}")
+                print(f"  {C.GREEN}✓ {agent}'s voice set to {v['key']}{C.RESET}")
                 r = input("  restart nova.service now to apply? [y/N] ").strip().lower()
                 if r == "y":
                     sp.run(["systemctl", "--user", "restart", "nova.service"])
@@ -574,7 +592,9 @@ def main():
     sub = parser.add_subparsers(dest="cmd")
     sub.add_parser("login", help="One-time Telegram user login")
     sub.add_parser("setup", help="List bot chats to configure agents")
-    sub.add_parser("tts-model", help="Browse and pick the TTS voice")
+    tts_model = sub.add_parser("tts-model", help="Browse and pick a per-agent TTS voice")
+    tts_model.add_argument("agent", nargs="?", default=None,
+                           help="Agent to set the voice for (e.g. pixelbot, jailbreak). Omit to just browse.")
     ask = sub.add_parser("ask", help="One-shot: send text to an agent and print+speak the reply")
     ask.add_argument("agent")
     ask.add_argument("message", nargs="+")
@@ -589,7 +609,7 @@ def main():
         _setup_list_bots(config)
         return
     if args.cmd == "tts-model":
-        _voice_picker(config)
+        _voice_picker(config, agent=args.agent)
         return
     if args.cmd == "ask":
         bridge = VoiceBridge(config)
@@ -601,8 +621,9 @@ def main():
         bridge._start_speech_worker()
         bridge._send_text(args.agent, " ".join(args.message))
         # wait for the reply to finish speaking
+        tts = bridge.tts_engines.get(args.agent)
         for _ in range(1200):
-            if bridge._speech_q.empty() and not (bridge.tts and bridge.tts.is_speaking()):
+            if bridge._speech_q.empty() and not (tts and tts.is_speaking()):
                 break
             time.sleep(0.1)
         return

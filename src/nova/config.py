@@ -15,9 +15,14 @@ import yaml
 
 CONFIG_DIR = Path(os.environ.get("NOVA_HOME", str(Path.home() / ".nova")))
 CONFIG_PATH = CONFIG_DIR / "config.yaml"
-# The `nova tts-model` picker writes the chosen voice key here (kept separate so
-# selecting a voice never rewrites/strips the user's commented config.yaml).
-SELECTION_FILE = CONFIG_DIR / "voice.selection"
+# The `nova tts-model` picker writes the chosen voice key here — one file per
+# agent, so each agent can have its own voice — kept separate from
+# config.yaml so selecting a voice never rewrites/strips the user's comments.
+SELECTION_FILE = CONFIG_DIR / "voice.selection"  # legacy global fallback
+
+
+def selection_file(agent: str) -> Path:
+    return CONFIG_DIR / f"voice.selection.{agent}"
 
 # Sensible defaults. Everything here can be overridden by ~/.nova/config.yaml.
 DEFAULTS: dict = {
@@ -35,14 +40,19 @@ DEFAULTS: dict = {
             # cached in the Telethon session.
             "bot": "@PixelBot",
             "reply_timeout_s": 180,  # cloud agent + tools can be slow
+            # TTS voice for this agent's replies — a key from nova.voices.
+            # Override with `nova tts-model pixelbot`.
+            "voice": "real:nms_suit",
         },
         "jailbreak": {
             "bot": "@JailbreakBot",
             "reply_timeout_s": 150,  # local heretic on the RTX 3090
+            "voice": "real:hal9000",
         },
     },
     "voice": {
-        # Active TTS voice — a key from nova.voices (set via `nova tts-model`).
+        # Fallback voice for agents without their own `voice` key, and for
+        # system/boot messages ("Nova online").
         "selection": "piper:en_US-ryan-high",
         # turbo on CPU ≈ large-v3 accuracy at ~0.6× real-time, zero VRAM use —
         # so STT never competes with the GPU model inference.
@@ -97,11 +107,19 @@ class Config:
                 raise ValueError(f"{path} must be a YAML mapping, got {type(loaded).__name__}")
             user_data = loaded
         merged = _deep_merge(DEFAULTS, user_data)
-        # The picker's selection file wins over config.yaml for the voice.
+        # Legacy global fallback voice, if ever set by an older picker.
         if SELECTION_FILE.exists():
             sel = SELECTION_FILE.read_text().strip()
             if sel:
                 merged.setdefault("voice", {})["selection"] = sel
+        # Per-agent voice picks (the picker's primary path) win over
+        # config.yaml and the legacy global fallback.
+        for agent_name, agent_cfg in merged.get("agents", {}).items():
+            sel_path = selection_file(agent_name)
+            if sel_path.exists():
+                sel = sel_path.read_text().strip()
+                if sel:
+                    agent_cfg["voice"] = sel
         return cls(merged)
 
     def get(self, dotted: str, default: Any = None) -> Any:
@@ -123,6 +141,11 @@ class Config:
     @property
     def agent_names(self) -> list:
         return list(self._data.get("agents", {}).keys())
+
+    def voice_for(self, agent: str) -> str:
+        """Resolve the TTS voice key for an agent, falling back to the global default."""
+        agent_voice = self.agent(agent).get("voice")
+        return agent_voice or self.get("voice.selection", "piper:en_US-ryan-high")
 
     def expanduser(self, dotted: str, default: Any = None) -> Optional[str]:
         """Get a path setting with ~ expanded."""

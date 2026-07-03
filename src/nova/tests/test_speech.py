@@ -25,7 +25,7 @@ class FakeTTS:
 
 def _bridge():
     b = VoiceBridge(Config.load())
-    b.tts = FakeTTS()
+    b.tts_engines = {"pixelbot": FakeTTS(), "jailbreak": FakeTTS()}
     b._running = True
     b._start_speech_worker()
     return b
@@ -33,32 +33,42 @@ def _bridge():
 
 def test_speech_plays_when_idle():
     b = _bridge()
-    b._speak("hello world")
+    b._speak("pixelbot", "hello world")
     time.sleep(0.4)
-    assert b.tts.spoken == ["hello world"]
+    assert b.tts_engines["pixelbot"].spoken == ["hello world"]
     b._running = False
 
 
 def test_speech_held_while_recording_then_plays():
     b = _bridge()
     b._rec_active.set()          # pretend the mic is live
-    b._speak("delayed reply")
+    b._speak("pixelbot", "delayed reply")
     time.sleep(0.4)
-    assert b.tts.spoken == []     # must NOT play during recording (would echo)
+    assert b.tts_engines["pixelbot"].spoken == []     # must NOT play during recording (would echo)
     b._rec_active.clear()         # recording stopped
     time.sleep(0.4)
-    assert b.tts.spoken == ["delayed reply"]
+    assert b.tts_engines["pixelbot"].spoken == ["delayed reply"]
     b._running = False
 
 
 def test_flush_drops_queued_and_stops_playback():
     b = _bridge()
     b._rec_active.set()
-    b._speak("stale one")
-    b._speak("stale two")
+    b._speak("pixelbot", "stale one")
+    b._speak("pixelbot", "stale two")
     time.sleep(0.2)
     b._flush_speech()             # barge-in
     b._rec_active.clear()
     time.sleep(0.4)
-    assert b.tts.spoken == []     # both dropped
+    assert b.tts_engines["pixelbot"].spoken == []     # both dropped
+    b._running = False
+
+
+def test_each_agent_speaks_in_its_own_voice():
+    b = _bridge()
+    b._speak("pixelbot", "nms line")
+    b._speak("jailbreak", "hal line")
+    time.sleep(0.5)
+    assert b.tts_engines["pixelbot"].spoken == ["nms line"]
+    assert b.tts_engines["jailbreak"].spoken == ["hal line"]
     b._running = False
