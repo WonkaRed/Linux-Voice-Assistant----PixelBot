@@ -14,10 +14,7 @@ import numpy as np
 
 _MODELS = os.path.expanduser("~/.nova/models")
 _GLADOS_DIR = os.path.expanduser("~/.nova/glados")
-_XVA_DIR = os.path.expanduser("~/.nova/xvasynth")
 _RVC_DIR = os.path.expanduser("~/.nova/rvc")
-_LOCAL_LIB = os.path.expanduser("~/.local/lib")   # our built espeak-ng, for xVASynth
-_LOCAL_BIN = os.path.expanduser("~/.local/bin")
 _kokoro = None
 _piper_cache = {}
 
@@ -116,22 +113,6 @@ def synth_to_wav(entry: dict, text: str, out_path: str) -> str:
             [os.path.join(_GLADOS_DIR, ".venv", "bin", "python"),
              os.path.join(_GLADOS_DIR, "glados_synth.py"), text, tmp],
             check=True, timeout=60, cwd=_GLADOS_DIR,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-    elif engine == "xvasynth":
-        # Real xVASynth character model (xVAPitch). Needs our locally-built
-        # espeak-ng (no sudo) on PATH/LD_LIBRARY_PATH for out-of-dictionary
-        # word phonemization.
-        env = {
-            **os.environ,
-            "LD_LIBRARY_PATH": _LOCAL_LIB + ":" + os.environ.get("LD_LIBRARY_PATH", ""),
-            "PATH": _LOCAL_BIN + ":" + os.environ.get("PATH", ""),
-        }
-        ckpt = os.path.join(_XVA_DIR, entry["ckpt"])
-        subprocess.run(
-            [os.path.join(_XVA_DIR, ".venv", "bin", "python"),
-             os.path.join(_XVA_DIR, "xva_synth.py"), text, ckpt, tmp, "cpu"],
-            check=True, timeout=60, cwd=_XVA_DIR, env=env,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
     elif engine == "rvc":

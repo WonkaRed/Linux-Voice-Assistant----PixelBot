@@ -42,7 +42,7 @@ DEFAULTS: dict = {
             "reply_timeout_s": 180,  # cloud agent + tools can be slow
             # TTS voice for this agent's replies — a key from nova.voices.
             # Override with `nova tts-model pixelbot`.
-            "voice": "real:nms_suit",
+            "voice": "real:cyclops",
         },
         "jailbreak": {
             "bot": "@JailbreakBot",
