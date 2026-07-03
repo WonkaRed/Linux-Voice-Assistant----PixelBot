@@ -143,21 +143,34 @@ and overrides config.yaml). Defaults:
 
 | Agent | Voice | Engine |
 |-------|-------|--------|
-| Pixel Bot (F4) | **No Man's Sky exosuit AI** — the genuine xVASynth voice model | `real:nms_suit` |
+| Pixel Bot (F4) | **Subnautica Cyclops AI** — genuine RVC v2 model (500 epochs) | `real:cyclops` |
 | Jailbreak (F8) | **HAL 9000** — genuine RVC v2 model trained on Douglas Rain's film dialogue | `real:hal9000` |
 
 These are real trained models, not effects on a generic voice — pulled from
-their original sources (see the commit history for exactly where). A third
-real model, GLaDOS (Forward Tacotron+HiFiGAN, the actual Portal checkpoint),
-is also in the catalog as `real:glados` if you want to switch either agent to it.
+their original sources (see git history for exactly where; the catalog was
+trimmed 2026-07-03 down to just what's used — a 70-voice version with
+Kokoro/Piper naturals and ffmpeg-effect robot approximations existed earlier
+if any of that is wanted back). A third real model, GLaDOS (Forward
+Tacotron+HiFiGAN, the actual Portal checkpoint), is also in the catalog as
+`real:glados` if you want to switch either agent to it.
 
-`nova tts-model <agent>` also has 70 other voices to browse: natural Kokoro/Piper
-voices plus ffmpeg-effect robot styles (JARVIS-ish, EDI-ish, Cortana-ish,
-Terminator-ish, etc. — approximations, not trained models).
+**Server-side prerequisite:** both Hermes profiles (`default` and `jailbreak`
+on 10.0.0.75) must have the `tts` toolset disabled
+(`disabled_toolsets: [tts]` in `~/.hermes/config.yaml` and
+`~/.hermes/profiles/jailbreak/config.yaml`, gateway restarted after). Without
+this, the agent can decide mid-turn to call its own `text_to_speech` tool and
+send Edge-TTS audio as a Telegram voice message instead of (or alongside) the
+text Nova expects — bypassing the local character voice entirely. Verify with
+`hermes tools list | grep tts` on the server (should show `✗ disabled`).
 
-Each real-model engine (`~/.nova/glados/`, `~/.nova/xvasynth/`, `~/.nova/rvc/`) is
-self-contained with its own venv. HAL 9000 (RVC) runs behind a persistent
-background server (`~/.nova/rvc/rvc_server.py`, auto-started on first use,
+`nova tts-model <agent>` also has one fallback voice to browse:
+`piper:en_US-ryan-high`, a plain natural male voice used automatically if a
+configured real-model voice ever fails to load.
+
+Each real-model engine (`~/.nova/glados/`, `~/.nova/rvc/`) is self-contained
+with its own venv, rebuilt with CPU-only torch so the GPU is never touched.
+HAL 9000 and Cyclops (both RVC) run behind a persistent background server
+(`~/.nova/rvc/rvc_server.py`, auto-started on first use,
 listens on `/tmp/nova-rvc.sock`) so replies come back in a few seconds instead
 of reloading its ~350 MB of weights on every line.
 
