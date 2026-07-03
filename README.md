@@ -73,7 +73,7 @@ mkdir -p ~/.nova/models/piper ~/.nova/models/kokoro
 BASE=https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high
 curl -fsSL -o ~/.nova/models/piper/en_US-ryan-high.onnx      $BASE/en_US-ryan-high.onnx
 curl -fsSL -o ~/.nova/models/piper/en_US-ryan-high.onnx.json $BASE/en_US-ryan-high.onnx.json
-# Kokoro (40+ voices) for `nova tts-model`
+# Kokoro (multi-voice) for `nova tts-model`
 KO=https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0
 curl -fsSL -o ~/.nova/models/kokoro/kokoro-v1.0.onnx $KO/kokoro-v1.0.onnx
 curl -fsSL -o ~/.nova/models/kokoro/voices-v1.0.bin  $KO/voices-v1.0.bin
@@ -125,14 +125,15 @@ into your next message.
 
 ```bash
 ./nova ask pixelbot "what's on my calendar today"   # one-shot text → voice reply
-./nova tts-model                                     # browse 40+ voices, preview, pick one
+./nova tts-model                                     # browse 70+ voices, preview, pick one
 ./nova                                               # foreground/interactive (stop the service first)
 ```
 
 **Voices:** `nova tts-model` is an interactive picker — type a number to hear a
-voice, `u <n>` to make it the active one (Kokoro + Piper voices, plus robot/
-character styles like GLaDOS-ish, HAL, Dalek, PDA). It restarts the service to
-apply.
+voice, `u <n>` to make it the active one. 70 voices: Kokoro + Piper natural
+voices, plus 22 robot/character styles (GLaDOS, HAL 9000, JARVIS, EDI, Cortana,
+Terminator, C-3PO, Portal turret, Dalek, Cylon, classic DECtalk-style computer,
+PDA, and more). It restarts the service to apply.
 
 Interactively you can also type `pixelbot: <text>` or `/voice jailbreak`.
 
@@ -146,8 +147,5 @@ Interactively you can also type `pixelbot: <text>` or `/voice jailbreak`.
   `nvidia-smi` shows ≳3 GB free VRAM — otherwise it fights the heretic. (Requires a
   working driver; a *driver/library version mismatch* means CUDA is down until reboot.)
 - **Audio:** capture via `arecord` (ALSA/PipeWire), playback via `aplay`. No PortAudio.
-- **Telegram:** logs in as your user account. `~/.nova/nova.session` is an auth
-  credential — gitignored; never share it.
-- **Audio:** capture uses `arecord` (ALSA/PipeWire); playback uses `aplay`. No PortAudio.
-- **Telegram:** Nova logs in as your user account (a userbot). The session file
-  `~/.nova/nova.session` is an auth credential — it is gitignored; never share it.
+- **Telegram:** logs in as your user account (a userbot). `~/.nova/nova.session` is
+  an auth credential — gitignored; never share it.

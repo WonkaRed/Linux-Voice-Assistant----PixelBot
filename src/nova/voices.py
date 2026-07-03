@@ -16,6 +16,18 @@ _CYLON = "flanger=depth=3:speed=0.4,tremolo=f=18:d=0.35,highpass=f=100"
 _DEEPROBOT = "asetrate=24000*0.88,atempo=1.136,aresample=24000,flanger=depth=3:speed=0.5,highpass=f=90"
 _COMMS = "highpass=f=300,lowpass=f=3400,acompressor=threshold=-18dB:ratio=4,volume=3.5,alimiter=limit=0.95"
 _PDA = "highpass=f=100,lowpass=f=9000,acompressor=threshold=-18dB:ratio=2.5,aecho=0.85:0.9:26:0.08"
+# ---- new batch ----
+_TERMINATOR = "asetrate=24000*0.85,atempo=1.176,aresample=24000,highpass=f=65,lowpass=f=7000,acompressor=threshold=-14dB:ratio=4,volume=2.5"
+_JARVIS = "highpass=f=90,lowpass=f=9500,acompressor=threshold=-20dB:ratio=2,aecho=0.8:0.7:18:0.06"
+_EDI = "highpass=f=200,lowpass=f=8000,chorus=0.4:0.8:40:0.25:0.2:1.5,acompressor=threshold=-18dB:ratio=2.5"
+_CORTANA = "chorus=0.6:0.9:35|45|55:0.35|0.3|0.28:0.3|0.25|0.4:1.8|1.3|2.1,highpass=f=150,volume=1.6"
+_TURRET = "asetrate=24000*1.06,atempo=0.943,aresample=24000,highpass=f=250,lowpass=f=7500,acompressor=threshold=-16dB:ratio=2.5"
+_DECTALK = "acrusher=bits=6:mode=log:mix=0.85,highpass=f=200,lowpass=f=4200,volume=3.5,alimiter=limit=0.95"
+_C3PO = "highpass=f=220,lowpass=f=7200,acompressor=threshold=-18dB:ratio=2,volume=1.5"
+_STATION = "highpass=f=110,lowpass=f=8500,aecho=0.85:0.85:120:0.25,acompressor=threshold=-18dB:ratio=2"
+_PA_ANNOUNCE = "highpass=f=280,lowpass=f=3200,aecho=0.7:0.6:70:0.35,acompressor=threshold=-16dB:ratio=4,volume=3"
+_ALIEN = "asetrate=24000*0.80,atempo=1.25,aresample=24000,tremolo=f=12:d=0.5,chorus=0.5:0.9:45:0.4:0.3:1.5,highpass=f=60"
+_ROBOCOP = "asetrate=24000*0.90,atempo=1.111,aresample=24000,highpass=f=200,lowpass=f=4500,acompressor=threshold=-14dB:ratio=5,volume=3"
 
 
 def _kok(voice, lang="en-us", **kw):
@@ -50,6 +62,10 @@ VOICES = [
     {"key": "kokoro:bm_george", **_kok("bm_george", "en-gb"), "cat": "Male", "desc": "British"},
     {"key": "kokoro:bm_lewis", **_kok("bm_lewis", "en-gb"), "cat": "Male", "desc": "British, deep"},
     {"key": "kokoro:bm_fable", **_kok("bm_fable", "en-gb"), "cat": "Male", "desc": "British, storyteller"},
+    {"key": "kokoro:am_echo", **_kok("am_echo"), "cat": "Male", "desc": "resonant"},
+    {"key": "kokoro:am_puck", **_kok("am_puck"), "cat": "Male", "desc": "playful"},
+    {"key": "kokoro:am_santa", **_kok("am_santa"), "cat": "Male", "desc": "jolly/booming"},
+    {"key": "kokoro:bm_daniel", **_kok("bm_daniel", "en-gb"), "cat": "Male", "desc": "British, measured"},
     # ---------------- Piper (different engine) ----------------
     {"key": "piper:en_US-ryan-high", "engine": "piper", "voice": "en_US-ryan-high", "cat": "Piper", "desc": "male (current default)"},
     {"key": "piper:en_US-amy-medium", "engine": "piper", "voice": "en_US-amy-medium", "cat": "Piper", "desc": "female US"},
@@ -57,6 +73,20 @@ VOICES = [
     {"key": "piper:en_GB-alba-medium", "engine": "piper", "voice": "en_GB-alba-medium", "cat": "Piper", "desc": "female Scottish"},
     {"key": "piper:en_US-hfc_female-medium", "engine": "piper", "voice": "en_US-hfc_female-medium", "cat": "Piper", "desc": "female US"},
     {"key": "piper:en_US-kristin-medium", "engine": "piper", "voice": "en_US-kristin-medium", "cat": "Piper", "desc": "female US"},
+    {"key": "piper:en_US-kathleen-low", "engine": "piper", "voice": "en_US-kathleen-low", "cat": "Piper", "desc": "female US"},
+    {"key": "piper:en_US-ljspeech-high", "engine": "piper", "voice": "en_US-ljspeech-high", "cat": "Piper", "desc": "female US, crisp"},
+    {"key": "piper:en_GB-cori-high", "engine": "piper", "voice": "en_GB-cori-high", "cat": "Piper", "desc": "female GB"},
+    {"key": "piper:en_US-joe-medium", "engine": "piper", "voice": "en_US-joe-medium", "cat": "Piper", "desc": "male US"},
+    {"key": "piper:en_US-john-medium", "engine": "piper", "voice": "en_US-john-medium", "cat": "Piper", "desc": "male US"},
+    {"key": "piper:en_US-norman-medium", "engine": "piper", "voice": "en_US-norman-medium", "cat": "Piper", "desc": "male US"},
+    {"key": "piper:en_US-bryce-medium", "engine": "piper", "voice": "en_US-bryce-medium", "cat": "Piper", "desc": "male US, young"},
+    {"key": "piper:en_US-danny-low", "engine": "piper", "voice": "en_US-danny-low", "cat": "Piper", "desc": "male US, young"},
+    {"key": "piper:en_US-hfc_male-medium", "engine": "piper", "voice": "en_US-hfc_male-medium", "cat": "Piper", "desc": "male US"},
+    {"key": "piper:en_US-lessac-high", "engine": "piper", "voice": "en_US-lessac-high", "cat": "Piper", "desc": "male US, crisp"},
+    {"key": "piper:en_US-kusal-medium", "engine": "piper", "voice": "en_US-kusal-medium", "cat": "Piper", "desc": "male US, accented"},
+    {"key": "piper:en_US-sam-medium", "engine": "piper", "voice": "en_US-sam-medium", "cat": "Piper", "desc": "male US"},
+    {"key": "piper:en_GB-alan-medium", "engine": "piper", "voice": "en_GB-alan-medium", "cat": "Piper", "desc": "male GB"},
+    {"key": "piper:en_GB-northern_english_male-medium", "engine": "piper", "voice": "en_GB-northern_english_male-medium", "cat": "Piper", "desc": "male GB, Northern"},
     # ---------------- Robot / character (effect on a base voice) ----------------
     {"key": "robot:glados", **_kok("bf_emma", "en-gb", effect=_GLADOS), "cat": "Robot", "desc": "GLaDOS-style (F)"},
     {"key": "robot:pda_emma", **_kok("bf_emma", "en-gb", effect=_PDA), "cat": "Robot", "desc": "Subnautica-PDA-style (F)"},
@@ -69,6 +99,17 @@ VOICES = [
     {"key": "robot:tars", **_kok("am_onyx", effect=_TARS), "cat": "Robot", "desc": "TARS-ish deep (M)"},
     {"key": "robot:cylon", **_kok("am_michael", effect=_CYLON), "cat": "Robot", "desc": "Cylon metallic (M)"},
     {"key": "robot:deep_robot", **_kok("am_michael", effect=_DEEPROBOT), "cat": "Robot", "desc": "deep robot (M)"},
+    {"key": "robot:terminator", **_kok("am_fenrir", effect=_TERMINATOR), "cat": "Robot", "desc": "Terminator-ish (M)"},
+    {"key": "robot:jarvis", **_kok("bm_george", "en-gb", effect=_JARVIS), "cat": "Robot", "desc": "JARVIS-ish, smooth British AI (M)"},
+    {"key": "robot:edi", **_kok("af_kore", effect=_EDI), "cat": "Robot", "desc": "EDI-ish, clinical ship AI (F)"},
+    {"key": "robot:cortana", **_kok("af_sky", effect=_CORTANA), "cat": "Robot", "desc": "Cortana-ish, ethereal AI (F)"},
+    {"key": "robot:turret", **_kok("af_bella", effect=_TURRET), "cat": "Robot", "desc": "cheerful turret AI (F)"},
+    {"key": "robot:dectalk", **_kok("am_liam", effect=_DECTALK), "cat": "Robot", "desc": "classic 80s computer voice (M)"},
+    {"key": "robot:c3po", **_kok("bm_lewis", "en-gb", effect=_C3PO), "cat": "Robot", "desc": "prim protocol droid (M)"},
+    {"key": "robot:station", **_kok("af_river", effect=_STATION), "cat": "Robot", "desc": "space-station computer (F)"},
+    {"key": "robot:pa_announce", **_kok("am_adam", effect=_PA_ANNOUNCE), "cat": "Robot", "desc": "PA/announcer system (M)"},
+    {"key": "robot:alien", **_kok("am_fenrir", effect=_ALIEN), "cat": "Robot", "desc": "alien/distorted (M)"},
+    {"key": "robot:robocop", **_kok("am_michael", effect=_ROBOCOP), "cat": "Robot", "desc": "police-scanner cyborg (M)"},
 ]
 
 BY_KEY = {v["key"]: v for v in VOICES}
