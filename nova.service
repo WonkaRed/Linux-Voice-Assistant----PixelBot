@@ -17,6 +17,10 @@ RestartSec=5
 # Never fight the heretic / model inference for CPU — Nova always yields.
 Nice=10
 CPUWeight=20
+# Keep the STT model resident so recording never stalls paging it back from
+# swap (this box runs vm.swappiness=180). ~2 GB, trivially fits in RAM.
+MemorySwapMax=0
+MemoryLow=1600M
 
 [Install]
 WantedBy=default.target

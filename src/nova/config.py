@@ -46,7 +46,13 @@ DEFAULTS: dict = {
         "stt_compute_type": "int8",           # int8 for cpu; float16 for cuda
         "stt_cpu_threads": 0,                 # 0 = use all cores
         "tts_voice": str(CONFIG_DIR / "models" / "piper" / "en_US-ryan-high.onnx"),
-        "stream_chunk_s": 15,                 # transcribe long takes in ~15s chunks while recording
+        # Streaming STT: commit finished speech at pauses while you talk, so the
+        # post-stop wait is tiny. Tune silence_thresh up if a noisy mic never
+        # "pauses"; down if it splits too eagerly.
+        "stream_chunk_s": 9,                 # force a cut after this much unbroken speech
+        "stream_min_commit_s": 2.0,           # don't commit fragments shorter than this
+        "stream_min_silence_s": 0.3,         # a pause this long is a commit boundary
+        "stream_silence_thresh": 0.02,       # RMS (on [-1,1]) below this counts as silence
         "max_record_s": 720,                  # 12 min safety cap (still sends the full transcript)
     },
     # How the relay decides the bot has finished answering: after the first

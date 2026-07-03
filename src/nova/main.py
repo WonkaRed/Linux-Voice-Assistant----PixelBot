@@ -146,7 +146,13 @@ class VoiceBridge:
                     cpu_threads=int(self.config.get("voice.stt_cpu_threads", 0)),
                 )
                 self.audio = AudioCapture()
-                self.streamer = StreamingTranscriber(self.stt, chunk_s=self._chunk_s)
+                self.streamer = StreamingTranscriber(
+                    self.stt,
+                    chunk_s=float(self.config.get("voice.stream_chunk_s", 18)),
+                    min_commit_s=float(self.config.get("voice.stream_min_commit_s", 2.5)),
+                    min_silence_s=float(self.config.get("voice.stream_min_silence_s", 0.45)),
+                    silence_thresh=float(self.config.get("voice.stream_silence_thresh", 0.012)),
+                )
             log("Voice models loaded", "ok")
             notify("Nova", "Voice ready")
         except Exception as e:
