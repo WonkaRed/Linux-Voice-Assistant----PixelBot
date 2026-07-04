@@ -8,6 +8,7 @@ Features:
 - Multiple model sizes for speed/accuracy tradeoff
 """
 import logging
+import threading
 import time
 from typing import Optional, Tuple
 
@@ -25,6 +26,7 @@ class STTEngine:
         device: str = "cpu",
         compute_type: str = "int8",
         cpu_threads: int = 0,
+        device_index: int = 0,
     ):
         """
         Initialize STT engine.
@@ -35,16 +37,20 @@ class STTEngine:
             compute_type: Compute type (float16 for cuda; int8 for cpu)
             cpu_threads: CPU threads (0 = use all cores). Matters a lot for
                          CPU latency — the default 0 lets us pass all 16.
+            device_index: Which GPU to use when device="cuda" (for multi-GPU
+                          machines). Ignored on CPU.
         """
         self.model_size = model_size
         self.device = device
         self.compute_type = compute_type
+        self.device_index = device_index
         # 0 → let CTranslate2 use every core (CPU transcription is ~2× faster
         # with all 16 threads vs the library's conservative default).
         import os as _os
         self.cpu_threads = cpu_threads or (_os.cpu_count() or 4)
         self.model = None
         self.sample_rate = 16000  # Whisper requires 16kHz
+        self._switch_lock = threading.Lock()
 
         self._load_model()
 
@@ -61,6 +67,7 @@ class STTEngine:
                 self.model = WhisperModel(
                     model_size_or_path=self.model_size,
                     device=self.device,
+                    device_index=self.device_index,
                     compute_type=self.compute_type,
                     cpu_threads=self.cpu_threads,
                 )
@@ -221,6 +228,55 @@ class STTEngine:
         except ImportError:
             pass
         logger.info("STT model unloaded")
+
+    def switch_device(self, device: str, device_index: int = 0, compute_type: Optional[str] = None) -> bool:
+        """
+        Move the model to a different device in place, keeping this same
+        STTEngine object alive (so callers holding a reference — e.g. the
+        streaming transcriber — automatically pick up the new device on
+        their next call; nothing else needs to be rewired).
+
+        Thread-safe: callers should still hold whatever lock guards
+        transcribe() (e.g. the streaming poll lock) while calling this, so a
+        switch never races an in-flight transcription. This method also
+        holds its own lock as a second guard against concurrent switches.
+
+        On any failure, falls back to CPU (never leaves the engine with no
+        usable model) and returns False.
+        """
+        with self._switch_lock:
+            if device == self.device and (device != "cuda" or device_index == self.device_index):
+                return True  # already there — no-op
+
+            prior_device, prior_index, prior_compute = self.device, self.device_index, self.compute_type
+            target_compute = compute_type or ("float16" if device == "cuda" else "int8")
+
+            self.unload()
+            self.device = device
+            self.device_index = device_index
+            self.compute_type = target_compute
+            try:
+                self._load_model()
+                if self.model is not None and self.device == device:
+                    logger.info(f"STT switched to {self.device}" + (f" (GPU {device_index})" if device == "cuda" else ""))
+                    return True
+                # _load_model() silently fell back to CPU internally (its own
+                # CUDA try/except) — still a "successful" load, just not on
+                # the device we asked for.
+                if self.model is not None:
+                    logger.warning(f"STT requested {device} but landed on {self.device}")
+                    return False
+                raise RuntimeError("model is None after load")
+            except Exception as e:
+                logger.error(f"switch_device to {device} failed ({e}); reverting to {prior_device}")
+                self.device, self.device_index, self.compute_type = prior_device, prior_index, prior_compute
+                try:
+                    self._load_model()
+                except Exception as e2:
+                    logger.error(f"revert load also failed ({e2}); forcing CPU")
+                    self.device, self.compute_type = "cpu", "int8"
+                    self._load_model()
+                return False
 
     @property
     def is_loaded(self) -> bool:

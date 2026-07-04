@@ -16,6 +16,7 @@ Design notes:
 - TTS never plays while the mic is recording — that killed an echo loop where
   the agent's spoken reply was picked up and re-sent as your next message.
 """
+import logging
 import os
 import queue
 import sys
@@ -29,6 +30,22 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 DEBUG = os.environ.get("NOVA_DEBUG", "").lower() in ("1", "true", "yes")
+
+# Every module under nova.* uses logging.getLogger(__name__) (stt.py,
+# gpu_monitor.py, streaming.py, relay.py) — without a configured handler
+# those calls are silently dropped by Python's default logging setup, even
+# though the custom log()/print() calls below always show up. Wire this up
+# so nothing important (model loads, GPU switches, transcription errors)
+# vanishes from `journalctl --user -u nova.service`.
+logging.basicConfig(
+    level=logging.DEBUG if DEBUG else logging.INFO,
+    format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+# faster-whisper/ctranslate2 and httpx are chatty at INFO; keep them at WARNING
+# so the journal stays readable, but let everything nova.* through fully.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("faster_whisper").setLevel(logging.WARNING)
 
 _ASSETS = Path(__file__).resolve().parents[2] / "assets" / "sounds"
 
@@ -80,6 +97,7 @@ class VoiceBridge:
         self.socket_listener = None
         self.hotkeys = None
         self.streamer = None
+        self.gpu_watcher = None
 
         self._running = False
         self._recording_agent = None      # None = idle, else agent being recorded
@@ -162,11 +180,48 @@ class VoiceBridge:
                     min_silence_s=float(self.config.get("voice.stream_min_silence_s", 0.45)),
                     silence_thresh=float(self.config.get("voice.stream_silence_thresh", 0.012)),
                 )
+                self._init_gpu_watcher()
             log("Voice models loaded", "ok")
             notify("Nova", "Voice ready")
         except Exception as e:
             log(f"Model loading failed: {e}", "err")
             log("Fix the model/GPU issue — voice won't work until then.", "warn")
+
+    def _init_gpu_watcher(self):
+        """
+        Start the GPU-aware STT watcher (see gpu_monitor.py). Opt-out via
+        voice.gpu_dynamic.enabled: false. Uses the same _stt_lock the
+        streaming transcriber holds during a chunk, so a switch either
+        happens instantly (idle) or waits the current chunk out — never
+        corrupts an in-flight transcription.
+        """
+        if not self.config.get("voice.gpu_dynamic.enabled", True):
+            log("GPU-dynamic STT disabled by config", "info")
+            return
+        try:
+            from nova.gpu_monitor import GPUWatcher
+
+            def _on_switch(direction, detail):
+                if direction == "gpu":
+                    log(f"STT moved onto {detail} (free VRAM allowed it)", "ok")
+                    notify("Nova", f"STT → {detail} (faster)")
+                else:
+                    log(f"STT moved back to CPU ({detail})", "warn")
+                    notify("Nova", "STT → CPU (yielding GPU room)")
+
+            self.gpu_watcher = GPUWatcher(
+                stt_engine=self.stt,
+                switch_lock=self._stt_lock,
+                load_threshold_mb=float(self.config.get("voice.gpu_dynamic.load_threshold_mb", 6144)),
+                unload_threshold_mb=float(self.config.get("voice.gpu_dynamic.unload_threshold_mb", 3072)),
+                active_poll_s=float(self.config.get("voice.gpu_dynamic.active_poll_s", 12)),
+                cooldown_poll_s=float(self.config.get("voice.gpu_dynamic.cooldown_poll_s", 300)),
+                gpu_compute_type=self.config.get("voice.gpu_dynamic.compute_type", "float16"),
+                on_switch=_on_switch,
+            )
+            self.gpu_watcher.start()
+        except Exception as e:
+            log(f"GPU watcher failed to start (STT stays on CPU): {e}", "warn")
 
     def _connect_relay(self):
         from nova.relay import TelegramRelay, RelayNotAuthorized
@@ -431,6 +486,8 @@ class VoiceBridge:
     def _cleanup(self):
         self._rec_active.clear()
         self._running = False
+        if self.gpu_watcher:
+            self.gpu_watcher.stop()
         for tts in self.tts_engines.values():
             tts.stop()
         if self.socket_listener:

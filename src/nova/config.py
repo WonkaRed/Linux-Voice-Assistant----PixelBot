@@ -60,6 +60,18 @@ DEFAULTS: dict = {
         "stt_device": "cpu",                  # cpu keeps us submissive to the GPUs
         "stt_compute_type": "int8",           # int8 for cpu; float16 for cuda
         "stt_cpu_threads": 0,                 # 0 = use all cores
+        # GPU-aware STT: opportunistically move Whisper onto a GPU when there's
+        # comfortable free VRAM, and back to CPU the instant that margin gets
+        # tight. Never touches the GPU without real headroom; see gpu_monitor.py
+        # for the full safety design (hysteresis + asymmetric poll cadence).
+        "gpu_dynamic": {
+            "enabled": True,
+            "load_threshold_mb": 6144,    # need >= this much free before loading onto a GPU
+            "unload_threshold_mb": 3072,  # evict back to CPU once free drops below this
+            "active_poll_s": 12,          # how often to re-check while ON a GPU (fast eviction)
+            "cooldown_poll_s": 300,       # how often to re-check while on CPU (slow, no spam)
+            "compute_type": "float16",    # compute_type used only while resident on GPU
+        },
         "tts_voice": str(CONFIG_DIR / "models" / "piper" / "en_US-ryan-high.onnx"),
         "tts_effect": None,                   # optional ffmpeg filter chain (robotic voice)
         # Streaming STT: commit finished speech at pauses while you talk, so the
