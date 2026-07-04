@@ -17,9 +17,48 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# Hermes marks a message "being worked on" with a \U0001f440 (eyes) reaction,
+# then swaps it for \U0001f44d/\U0001f44e (thumbs up/down) — or clears it on
+# cancellation — only *after* every reply for that turn has already been sent
+# (gateway/platforms/base.py: on_processing_complete runs after delivery).
+# That ordering makes the reaction flip a stronger "done" signal than a fixed
+# silence window: a tool call (web search, a slow shell command) can go quiet
+# for longer than any reasonable settle_s while Hermes is still working, which
+# used to make us return the tool-status bubble instead of the real answer.
+# Requires TELEGRAM_REACTIONS=true on the Hermes gateway; if that's unset (or
+# the bot can't react in this chat) no reaction ever appears and we fall back
+# to the settle_s heuristic exactly as before — pure opportunistic upgrade.
+REACTION_IN_PROGRESS = "\U0001f440"
+REACTIONS_TERMINAL = {"\U0001f44d", "\U0001f44e"}
+
 
 class RelayNotAuthorized(RuntimeError):
     """Raised when the Telethon session has no logged-in user yet."""
+
+
+class ReactionTracker:
+    """Tracks one message's Hermes processing-lifecycle reaction.
+
+    Feed it the set of reaction emoji currently on the triggering message
+    (from successive polls); ``done`` latches True once Hermes signals the
+    turn is over — a terminal reaction, or the in-progress one clearing
+    without ever becoming terminal (a cancelled run). Never resets once done.
+    """
+
+    def __init__(self):
+        self._saw_in_progress = False
+        self.done = False
+
+    def update(self, emojis: set) -> bool:
+        if self.done:
+            return True
+        if emojis & REACTIONS_TERMINAL:
+            self.done = True
+        elif REACTION_IN_PROGRESS in emojis:
+            self._saw_in_progress = True
+        elif self._saw_in_progress and not emojis:
+            self.done = True  # cleared after in-progress => cancelled/finished
+        return self.done
 
 
 def assemble_reply(collected: dict, mode: str = "last") -> str:
@@ -76,7 +115,14 @@ class TelegramRelay:
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
             # No loop= kwarg: Telethon binds to the current loop we just set.
-            self._client = TelegramClient(self._session, self._api_id, self._api_hash)
+            # connection_retries=None => retry forever. This runs unattended
+            # for weeks (sleep/wake, wifi/VPN changes, server reboots); the
+            # default of 5 retries then giving up would leave the relay
+            # silently dead until someone noticed and restarted the service.
+            self._client = TelegramClient(
+                self._session, self._api_id, self._api_hash,
+                connection_retries=None, retry_delay=1,
+            )
 
             self._loop.run_until_complete(self._client.connect())
             if not self._loop.run_until_complete(self._client.is_user_authorized()):
@@ -162,6 +208,19 @@ class TelegramRelay:
             self._entity_cache[bot] = await self._client.get_entity(target)
         return self._entity_cache[bot]
 
+    @staticmethod
+    def _reaction_emojis_of(msg) -> set:
+        """Emoji currently on a Telethon message, or {} if it has none."""
+        reactions = getattr(msg, "reactions", None)
+        if not reactions or not reactions.results:
+            return set()
+        out = set()
+        for r in reactions.results:
+            emo = getattr(r.reaction, "emoticon", None)
+            if emo:
+                out.add(emo)
+        return out
+
     async def _ask(self, bot: str, text: str, timeout: float) -> str:
         entity = await self._resolve(bot)
         sent = await self._client.send_message(entity, text)
@@ -172,11 +231,19 @@ class TelegramRelay:
         deadline = loop.time() + timeout
         collected: dict = {}      # msg_id -> latest text
         last_change: Optional[float] = None
+        reactions = ReactionTracker()
 
         while True:
-            # Re-read everything after our message; edits are caught because we
-            # compare text each pass (Hermes streams its answer as edits).
-            async for msg in self._client.iter_messages(entity, min_id=baseline, reverse=True):
+            # Re-read everything from our own message onward in one call:
+            # min_id=baseline-1 also picks up the baseline message itself, so
+            # we can read its reaction lifecycle (see module docstring) for
+            # free instead of issuing a second, separately-rate-limited API
+            # call every poll — Telegram flood-waits a chat that polls two
+            # methods every ~0.4s over a multi-minute tool-using turn.
+            async for msg in self._client.iter_messages(entity, min_id=baseline - 1, reverse=True):
+                if msg.id == baseline:
+                    reactions.update(self._reaction_emojis_of(msg))
+                    continue
                 if msg.out:
                     continue
                 body = msg.message or ""
@@ -187,6 +254,10 @@ class TelegramRelay:
             now = loop.time()
             have_reply = any(v.strip() for v in collected.values())
 
+            if have_reply and reactions.done:
+                # Authoritative: Hermes only sets the terminal reaction after
+                # every send for this turn has already completed.
+                break
             if have_reply and last_change is not None and (now - last_change) >= self._settle_s:
                 break
             if now >= deadline:
@@ -195,7 +266,13 @@ class TelegramRelay:
                     break
                 raise TimeoutError(f"No reply from {bot} within {timeout:.0f}s")
 
-            await asyncio.sleep(0.4)
+            # A tool-using turn can now legitimately run for minutes (we no
+            # longer bail out early on a quiet gap — see ReactionTracker);
+            # at 0.4s this loop was clocking ~450 GetHistoryRequest calls
+            # over a 3-minute turn, enough to trip Telegram's flood limit
+            # mid-conversation. 1s keeps voice latency imperceptible while
+            # giving a wide safety margin below that ceiling.
+            await asyncio.sleep(1.0)
 
         reply = assemble_reply(collected, self._reply_mode)
         logger.info("Reply from %s: %d message(s)", bot, sum(1 for v in collected.values() if v.strip()))

@@ -98,6 +98,8 @@ class VoiceBridge:
         self.hotkeys = None
         self.streamer = None
         self.gpu_watcher = None
+        self._relay_auth_failed = False
+        self._relay_watchdog_thread = None
 
         self._running = False
         self._recording_agent = None      # None = idle, else agent being recorded
@@ -124,6 +126,7 @@ class VoiceBridge:
         self._load_models()
         self._connect_relay()
         self._running = True            # must precede the speech worker
+        self._init_relay_watchdog()
         self._start_speech_worker()
         self._start_listeners()
         self._speak(self.config.agent_names[0] if self.config.agent_names else None, "Nova online.")
@@ -227,6 +230,7 @@ class VoiceBridge:
         from nova.relay import TelegramRelay, RelayNotAuthorized
         from nova.config import telegram_credentials
 
+        self._relay_auth_failed = False
         try:
             api_id, api_hash = telegram_credentials()
         except RuntimeError as e:
@@ -246,9 +250,36 @@ class VoiceBridge:
         except RelayNotAuthorized:
             log("Telegram session not authorized — run `nova login` first.", "err")
             self.relay = None
+            self._relay_auth_failed = True  # retrying won't help; needs `nova login`
         except Exception as e:
             log(f"Relay connection failed: {e}", "err")
             self.relay = None
+
+    def _init_relay_watchdog(self):
+        """
+        Retry the Telegram connection in the background if it never came up —
+        e.g. the service started at boot before the network was reachable, or
+        a DNS blip hit the very first connect attempt. Telethon itself
+        reconnects indefinitely once connected (connection_retries=None in
+        relay.py); this only covers the "never got connected in the first
+        place" case, which nothing else would ever retry.
+        """
+        def _loop():
+            while self._running:
+                time.sleep(30)
+                if not self._running:
+                    break
+                if self.relay is None and not self._relay_auth_failed:
+                    log("Relay not connected — retrying...", "warn")
+                    self._connect_relay()
+                    if self.relay is not None:
+                        log("Relay reconnected", "ok")
+                        notify("Nova", "Relay reconnected")
+
+        self._relay_watchdog_thread = threading.Thread(
+            target=_loop, name="relay-watchdog", daemon=True
+        )
+        self._relay_watchdog_thread.start()
 
     def _start_listeners(self):
         from nova.hotkey import SocketCommandListener, HotkeyListener

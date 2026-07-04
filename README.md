@@ -49,17 +49,28 @@ nova.service    # systemd --user unit (autostart, self-restart, reboot-proof)
 
 ## Runs as a service
 
-Nova runs as a `systemd --user` service — starts on login, restarts itself on
-failure, survives reboots, and is niced/CPU-weighted low so it always yields to
-the model inference. STT + TTS run on **CPU** (turbo ≈ large-v3 accuracy at
-~0.6× real-time, ~1.1 GB RAM, **zero VRAM**), so voice never competes with the
-dual-3090 heretic model.
+Nova runs as a `systemd --user` service — starts on login (linger-enabled, so
+it comes up on boot even with nobody logged in), restarts itself on failure
+with backoff instead of ever giving up, and is niced/CPU-weighted low so it
+always yields to the model inference. STT + TTS run on **CPU** (turbo ≈
+large-v3 accuracy at ~0.6× real-time, ~1.1 GB RAM, **zero VRAM**), so voice
+never competes with the dual-3090 heretic model.
 
 ```bash
 ./setup-autostart.sh                        # install + enable + start
 systemctl --user status nova.service        # check
 journalctl --user -u nova.service -f        # logs
 ```
+
+Self-management, so it survives unattended for weeks:
+- `After=network-online.target` — doesn't race the network at boot.
+- `Restart=always` with `RestartSteps`/`RestartMaxDelaySec` (no restart-count
+  ceiling) — a bad patch of failures backs off instead of giving up outright.
+- Telethon's own reconnect is unlimited (`connection_retries=None`), so wifi
+  changes, VPN toggles, or the server rebooting don't kill the relay for good.
+- If the Telegram connection never came up at all (e.g. no network yet at
+  boot), a background watchdog in `main.py` retries it every 30s — no manual
+  restart needed.
 
 ## Setup
 
@@ -173,6 +184,38 @@ HAL 9000 and Cyclops (both RVC) run behind a persistent background server
 (`~/.nova/rvc/rvc_server.py`, auto-started on first use,
 listens on `/tmp/nova-rvc.sock`) so replies come back in a few seconds instead
 of reloading its ~350 MB of weights on every line.
+
+## Getting the real final answer, not a tool-call status bubble
+
+`relay.py` waits for the bot's Telegram messages to go quiet for `settle_s`
+(2.5s) before treating a reply as finished — but a tool call (a shell command,
+a web search) can leave Hermes quiet for *longer* than that while it's still
+working, so Nova used to grab whatever tool-status bubble was on screen at the
+2.5s mark instead of the real answer.
+
+The fix: Hermes already marks the triggering message with a 👀 reaction while
+working and swaps it for 👍/👎 (or clears it on cancellation) — and critically,
+only *after* every reply for that turn has actually been sent. Nova now treats
+that reaction flip as the authoritative "done" signal instead of guessing from
+silence, so a tool call can run for minutes without Nova ever returning early.
+If reactions aren't available it falls back to the old silence-based behavior
+automatically — this is a pure opportunistic upgrade, not a hard dependency.
+
+**Server-side prerequisite:** `TELEGRAM_REACTIONS=true` in the environment of
+each Hermes gateway you want this for (`hermes-gateway.service` /
+`hermes-gateway-jailbreak.service` on 10.0.0.75 — e.g. via a
+`systemctl --user edit` drop-in). Without it, Hermes never sets the reaction
+and Nova just falls back to silence-timing as before — safe either way, just
+less precise on slow tool calls.
+
+(`display.platforms.telegram.cleanup_progress: true` — which deletes the
+tool-progress bubbles after the turn finishes — is an optional companion to
+this. It's left OFF on both profiles: the reaction fix doesn't need it, and
+it was never cleanly verified on its own. When it *looked* like it hung the
+gateway during testing 2026-07-04, the real culprit turned out to be an
+unrelated `~/.hermes/active_profile=jailbreak` misconfiguration making the
+main gateway hijack the jailbreak profile — so cleanup_progress is unproven,
+not known-bad. Re-test it in isolation before enabling if you want it.)
 
 ## GPU-aware STT (opportunistic, safety-first)
 
