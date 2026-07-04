@@ -174,15 +174,41 @@ HAL 9000 and Cyclops (both RVC) run behind a persistent background server
 listens on `/tmp/nova-rvc.sock`) so replies come back in a few seconds instead
 of reloading its ~350 MB of weights on every line.
 
+## GPU-aware STT (opportunistic, safety-first)
+
+STT (Whisper) can move itself onto a GPU when there's real, comfortable free
+VRAM, and back to CPU the instant that margin gets tight — without ever
+contending with ComfyUI, the heretic model, or anything else running on the
+GPUs. On by default (`voice.gpu_dynamic.enabled: true`); everything else runs
+CPU-only always (TTS — Kokoro, Piper, GLaDOS, RVC — never touches the GPU;
+the RVC and GLaDOS venvs use CPU-only torch builds so this holds even if a
+config value were changed by mistake).
+
+How it decides:
+- Needs **≥6144 MB free** (`load_threshold_mb`) before moving onto a GPU —
+  real headroom beyond the model's own ~2.7-3.6 GB footprint, not just
+  "technically fits." Picks whichever GPU has the most free room.
+- Evicts back to CPU the moment free VRAM drops **below 3072 MB**
+  (`unload_threshold_mb`) — deliberately a lower number than the load
+  threshold, so a single reading near the boundary can't cause a flap.
+- Checks **every ~12s** while resident on a GPU (fast reaction if something
+  else needs the room) but only **every ~5 min** while on CPU
+  (`cooldown_poll_s`) — no reason to hammer a GPU that's been maxed out for a
+  while. Uses `pynvml` (a direct driver call, not `nvidia-smi` subprocesses),
+  so even the fast cadence is cheap.
+- Never interrupts an in-progress transcription — a switch either happens
+  instantly (idle) or waits out the current chunk (bounded to a few seconds),
+  using the same lock the streaming transcriber already holds.
+- Logs every switch (`journalctl --user -u nova.service | grep -i gpu`) and
+  sends a desktop notification.
+
+Override any of the above in `~/.nova/config.yaml` under `voice.gpu_dynamic`
+(`enabled`, `load_threshold_mb`, `unload_threshold_mb`, `active_poll_s`,
+`cooldown_poll_s`, `compute_type`). Set `enabled: false` to pin STT to CPU
+permanently.
+
 ## Requirements & known constraints
 
-- **Nova never touches the GPU — by hard requirement, not just default.** STT
-  (turbo int8, all cores, ~1.1 GB RAM) and every TTS engine (Kokoro, Piper,
-  GLaDOS, xVASynth, RVC) run CPU-only. The RVC and xVASynth/GLaDOS venvs use
-  CPU-only torch builds specifically so this holds even if a config value were
-  changed by mistake — the GPUs are reserved entirely for model inference
-  (the dual-3090 heretic). Do not set `voice.stt_device: cuda` or point any
-  voice engine at `cuda`/`gpu`.
 - **Audio:** capture via `arecord` (ALSA/PipeWire), playback via `aplay`. No PortAudio.
 - **Telegram:** logs in as your user account (a userbot). `~/.nova/nova.session` is
   an auth credential — gitignored; never share it.
