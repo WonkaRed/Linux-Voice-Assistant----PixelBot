@@ -19,6 +19,7 @@ Design notes:
 import logging
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -87,27 +88,44 @@ def play_sound(path):
         pass
 
 
+class _RecSession:
+    """One push-to-talk turn — its own transcriber, mic, poll thread and stop
+    flag. Turns used to share a single streamer + mic; when you switched agents
+    or re-recorded quickly, a still-finishing turn and the freshly-started one
+    mutated the same buffers and cross-contaminated transcripts (the "it sent my
+    words to both agents" bug). Making each turn independent removes that race,
+    and lets a turn keep processing (STT + send + reply) while the next turn
+    records. The Whisper model itself is shared, guarded by the bridge's
+    _stt_lock, so per-turn streamers stay cheap.
+    """
+
+    def __init__(self, agent, streamer, audio):
+        self.agent = agent
+        self.streamer = streamer
+        self.audio = audio
+        self.active = threading.Event()   # set while this turn owns the mic
+        self.started = time.monotonic()
+        self.poll_thread = None
+        self.final_audio = None
+
+
 class VoiceBridge:
     def __init__(self, config):
         self.config = config
         self.stt = None
         self.tts_engines = {}   # agent name -> TTSEngine (own voice per agent)
-        self.audio = None
         self.relay = None
         self.socket_listener = None
         self.hotkeys = None
-        self.streamer = None
         self.gpu_watcher = None
         self._relay_auth_failed = False
         self._relay_watchdog_thread = None
 
         self._running = False
-        self._recording_agent = None      # None = idle, else agent being recorded
+        self._session = None              # current _RecSession, or None when idle
         self._lock = threading.Lock()     # guards toggle state transitions
-        self._stt_lock = threading.Lock() # serialises model access (poll vs finish)
-        self._rec_active = threading.Event()
-        self._poll_thread = None
-        self._rec_started = 0.0
+        self._stt_lock = threading.Lock() # serialises Whisper access across turns
+        self._rec_active = threading.Event()  # any mic live? (speech worker anti-echo)
 
         # Speech is queued (agent, text) and only ever played when the mic is
         # idle (anti-echo); each agent speaks in its own configured voice.
@@ -168,21 +186,15 @@ class VoiceBridge:
             if with_stt:
                 from nova.voice.stt import STTEngine
                 from nova.voice.audio import AudioCapture
-                from nova.streaming import StreamingTranscriber
                 self.stt = STTEngine(
                     model_size=self.config.get("voice.stt_model", "large-v3-turbo"),
                     device=self.config.get("voice.stt_device", "cpu"),
                     compute_type=self.config.get("voice.stt_compute_type", "int8"),
                     cpu_threads=int(self.config.get("voice.stt_cpu_threads", 0)),
                 )
-                self.audio = AudioCapture()
-                self.streamer = StreamingTranscriber(
-                    self.stt,
-                    chunk_s=float(self.config.get("voice.stream_chunk_s", 18)),
-                    min_commit_s=float(self.config.get("voice.stream_min_commit_s", 2.5)),
-                    min_silence_s=float(self.config.get("voice.stream_min_silence_s", 0.45)),
-                    silence_thresh=float(self.config.get("voice.stream_silence_thresh", 0.012)),
-                )
+                # Fail fast if there's no usable mic recorder; the per-turn
+                # AudioCapture objects (built in _new_session) reuse this check.
+                AudioCapture()
                 self._init_gpu_watcher()
             log("Voice models loaded", "ok")
             notify("Nova", "Voice ready")
@@ -304,21 +316,60 @@ class VoiceBridge:
 
     # ------------------------------------------------------------------ recording
     def _toggle(self, agent):
+        """Push-to-talk state machine (one entry point for every key/socket press).
+
+        Idle              + press A  → start recording A.
+        Recording A       + press A  → stop, send A's message to A.
+        Recording A       + press B  → stop+send A's message to A, then
+                                       immediately start recording B (agent
+                                       switch — the message you just spoke goes
+                                       ONLY to A; B starts fresh).
+        Any state         + "__stop__" (record cap / /stop) → stop+send current.
+
+        Because each turn is an independent _RecSession, a turn that's still
+        transcribing/sending never interferes with the next one — you can also
+        stop A, immediately re-record for A, and both messages are sent (the
+        agent's gateway queues the second behind the first).
+        """
         with self._lock:
             if agent == "__stop__":
-                if self._recording_agent:
+                if self._session is not None:
                     self._stop_and_process()
                 return
-            # Debounce: ignore accidental double-fires (COSMIC key-repeat, etc.).
+
+            # Debounce accidental double-fires (COSMIC key-repeat, etc.). A real
+            # agent *switch* must never be debounced away, so only same-key /
+            # idle presses are subject to it.
             now = time.monotonic()
-            if now - self._last_toggle < self._debounce_s:
+            switching = self._session is not None and self._session.agent != agent
+            if not switching and now - self._last_toggle < self._debounce_s:
                 return
             self._last_toggle = now
 
-            if self._recording_agent:
-                self._stop_and_process()   # stops against the ORIGINAL agent
-            else:
+            if self._session is None:
                 self._start_listening(agent)
+            elif self._session.agent == agent:
+                self._stop_and_process()            # same key → stop + send
+            else:
+                self._stop_and_process()            # different agent → send current…
+                self._start_listening(agent)        # …then record the new one
+
+    def _new_session(self, agent) -> "Optional[_RecSession]":
+        """Build an independent recording session (own transcriber + mic)."""
+        from nova.streaming import StreamingTranscriber
+        from nova.voice.audio import AudioCapture
+        try:
+            streamer = StreamingTranscriber(
+                self.stt,
+                chunk_s=float(self.config.get("voice.stream_chunk_s", 18)),
+                min_commit_s=float(self.config.get("voice.stream_min_commit_s", 2.5)),
+                min_silence_s=float(self.config.get("voice.stream_min_silence_s", 0.45)),
+                silence_thresh=float(self.config.get("voice.stream_silence_thresh", 0.012)),
+            )
+            return _RecSession(agent, streamer, AudioCapture())
+        except Exception as e:
+            log(f"Could not start audio: {e}", "err")
+            return None
 
     def _start_listening(self, agent):
         if not self.stt or not self.stt.is_ready:
@@ -332,63 +383,92 @@ class VoiceBridge:
             return
 
         self._flush_speech()  # barge-in: drop queued/playing speech before we listen
-        if not self.audio:
-            from nova.voice.audio import AudioCapture
-            self.audio = AudioCapture()
+        session = self._new_session(agent)
+        if session is None:
+            return
 
-        if self.audio.start():
-            self.streamer.reset()
-            self._recording_agent = agent
-            self._rec_started = time.monotonic()
+        if session.audio.start():
+            session.active.set()
+            self._session = session
             self._rec_active.set()
-            self._poll_thread = threading.Thread(target=self._stream_poll_loop, daemon=True)
-            self._poll_thread.start()
+            session.poll_thread = threading.Thread(
+                target=self._stream_poll_loop, args=(session,), daemon=True
+            )
+            session.poll_thread.start()
             play_sound(_SOUND_START)
             log(f"Listening for {agent}... (press again to send)", "ok")
             notify("Nova", f"Listening → {agent}")
 
-    def _stream_poll_loop(self):
-        """Transcribe completed chunks while recording, so stop is near-instant."""
-        while self._rec_active.is_set():
+    def _stream_poll_loop(self, session: "_RecSession"):
+        """Transcribe completed chunks while recording, so stop is near-instant.
+
+        Bound to a specific session, so it only ever touches that turn's mic and
+        transcriber — a poll from a previous turn can't leak into a new one.
+        """
+        while session.active.is_set():
             time.sleep(1.5)
-            if not self._rec_active.is_set():
+            if not session.active.is_set():
                 break
             # Safety cap: end a runaway/very long take (still sends full text).
-            if time.monotonic() - self._rec_started > self._max_record_s:
+            if time.monotonic() - session.started > self._max_record_s:
                 log(f"Reached {self._max_record_s:.0f}s cap — auto-sending", "warn")
                 self._toggle("__stop__")
                 break
-            buf = self.audio.get_buffer_copy() if self.audio else None
+            buf = session.audio.get_buffer_copy()
             with self._stt_lock:
-                if not self._rec_active.is_set():
+                if not session.active.is_set():
                     break
                 try:
-                    self.streamer.poll(buf)
+                    session.streamer.poll(buf)
                 except Exception as e:
                     log(f"stream poll error: {e}", "warn")
 
     def _stop_and_process(self):
-        agent = self._recording_agent
-        self._recording_agent = None
+        session = self._session
+        self._session = None
+        if session is None:
+            return
+        session.active.clear()
         self._rec_active.clear()
         play_sound(_SOUND_STOP)
-        final_audio = self.audio.stop() if self.audio else None
-        threading.Thread(target=self._process, args=(agent, final_audio), daemon=True).start()
+        session.final_audio = session.audio.stop()
+        threading.Thread(target=self._process, args=(session,), daemon=True).start()
 
-    def _process(self, agent, final_audio):
-        # Let the streaming poll thread finish its current chunk first.
-        if self._poll_thread:
-            self._poll_thread.join(timeout=30)
+    _CMD_WORDS = ("steer", "queue")
+    # Leading control word (steer/queue) → the corresponding Hermes slash
+    # command. ``\b`` after the word means "steering the ship" won't trigger,
+    # but "steer," / "queue:" / "Queue " will. Rest of the utterance is kept.
+    _CMD_RE = re.compile(r"^\s*(steer|queue)\b[\s,.:;!?-]*(.*)$", re.IGNORECASE | re.DOTALL)
+
+    def _apply_command_prefix(self, text: str) -> str:
+        """If a spoken message opens with 'steer' or 'queue', turn it into the
+        '/steer …' / '/queue …' gateway command Hermes understands."""
+        m = self._CMD_RE.match(text)
+        if not m:
+            return text
+        cmd, rest = m.group(1).lower(), m.group(2).strip()
+        return f"/{cmd} {rest}".rstrip()
+
+    def _process(self, session: "_RecSession"):
+        agent = session.agent
+        # Let this turn's own poll thread finish its current chunk first.
+        if session.poll_thread:
+            session.poll_thread.join(timeout=30)
         try:
+            final_audio = session.final_audio
             buf = final_audio if final_audio is not None else np.array([], dtype=np.float32)
             start = time.time()
             with self._stt_lock:
-                text = self.streamer.finish(buf)
+                text = session.streamer.finish(buf)
             if not text or not text.strip():
                 log("No speech detected", "warn")
                 self._speak(agent, "I didn't catch that.")
                 return
             log(f"[{agent}] heard ({time.time()-start:.1f}s, {len(buf)/16000:.0f}s audio): {text}", "ok")
+
+            send_text = self._apply_command_prefix(text)
+            if send_text != text:
+                log(f"[{agent}] command: {send_text[:80]}", "info")
 
             if not self.relay or not self.relay.connected:
                 self._speak(agent, "The relay isn't connected. Run nova login.")
@@ -399,7 +479,7 @@ class VoiceBridge:
             log(f"[{agent}] asking...", "info")
             notify("Nova", f"{agent} is thinking…")
 
-            reply = self.relay.ask(bot, text, timeout=timeout)
+            reply = self.relay.ask(bot, send_text, timeout=timeout)
             if reply and reply.strip():
                 log(f"[{agent}] reply: {reply[:200]}", "ok")
                 self._speak(agent, reply)

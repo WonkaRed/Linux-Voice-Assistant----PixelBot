@@ -136,6 +136,26 @@ ascending chime means "listening", a descending one means "captured/sending".
 The agent's spoken reply never plays while the mic is live, so it can't echo back
 into your next message.
 
+**Switching agents mid-thought.** Each turn is fully independent, so you can:
+
+- **Switch agents in one move** — while recording for Pixel Bot, press **F8**:
+  what you just said is sent to *Pixel Bot only*, and recording immediately
+  begins for Jailbreak. (Pressing the *same* key stops and sends as usual.)
+- **Fire a follow-up before the reply lands** — F4, talk, F4 (sends), then F4
+  again and talk: the second message is sent too; the agent's gateway queues it
+  behind the first. Nothing you say to one agent can bleed into another.
+
+**Voice commands.** Start your sentence with **"steer"** or **"queue"** to send
+the agent a gateway command instead of a plain message:
+
+- *"steer actually focus on the database"* → `/steer actually focus on the
+  database` — redirect the agent mid-turn.
+- *"queue then write the tests"* → `/queue then write the tests` — line it up
+  for after the current turn.
+
+(Only a leading `steer`/`queue` word triggers it — "steering the ship" is left
+alone. Whisper occasionally hears "queue" as "cue"; say it clearly.)
+
 ```bash
 ./nova ask pixelbot "what's on my calendar today"   # one-shot text → voice reply
 ./nova tts-model pixelbot                            # browse voices, pick pixelbot's
