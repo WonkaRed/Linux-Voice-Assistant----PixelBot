@@ -10,7 +10,11 @@ class FakeTTS:
         self.spoken = []
         self._speaking = False
 
-    def speak(self, text, blocking=True):
+    def speak(self, text, blocking=True, should_continue=None):
+        # Honour the barge-in gate like the real engine: if the turn was
+        # invalidated before we start, don't "play".
+        if should_continue is not None and not should_continue():
+            return True
         self._speaking = True
         self.spoken.append(text)
         self._speaking = False

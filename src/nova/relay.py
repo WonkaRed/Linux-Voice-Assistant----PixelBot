@@ -228,10 +228,13 @@ class TelegramRelay:
         logger.info("Sent to %s (msg %d): %s", bot, baseline, text[:80])
 
         loop = asyncio.get_event_loop()
-        deadline = loop.time() + timeout
+        t_send = loop.time()
+        deadline = t_send + timeout
         collected: dict = {}      # msg_id -> latest text
         last_change: Optional[float] = None
         reactions = ReactionTracker()
+        t_first_reply: Optional[float] = None   # when the bot's first text landed
+        reason = "?"
 
         while True:
             # Re-read everything from our own message onward in one call:
@@ -253,27 +256,45 @@ class TelegramRelay:
 
             now = loop.time()
             have_reply = any(v.strip() for v in collected.values())
+            if have_reply and t_first_reply is None:
+                t_first_reply = now
 
             if have_reply and reactions.done:
                 # Authoritative: Hermes only sets the terminal reaction after
-                # every send for this turn has already completed.
+                # every send for this turn has already completed. This lets us
+                # return the instant the turn is really done instead of waiting
+                # out the settle window.
+                reason = "reaction"
                 break
             if have_reply and last_change is not None and (now - last_change) >= self._settle_s:
+                # Fallback when reactions aren't available (TELEGRAM_REACTIONS
+                # off, or the bot can't react in this chat): the answer has been
+                # quiet for settle_s, treat it as done.
+                reason = "settle"
                 break
             if now >= deadline:
                 if have_reply:
                     logger.warning("Reply timeout hit; returning what we have")
+                    reason = "timeout"
                     break
                 raise TimeoutError(f"No reply from {bot} within {timeout:.0f}s")
 
-            # A tool-using turn can now legitimately run for minutes (we no
-            # longer bail out early on a quiet gap — see ReactionTracker);
-            # at 0.4s this loop was clocking ~450 GetHistoryRequest calls
-            # over a 3-minute turn, enough to trip Telegram's flood limit
-            # mid-conversation. 1s keeps voice latency imperceptible while
-            # giving a wide safety margin below that ceiling.
-            await asyncio.sleep(1.0)
+            # Adaptive poll cadence: snappy while the turn is fresh (most voice
+            # turns finish in a few seconds — this is what the user feels), then
+            # back off once a turn is clearly long-running (a tool call) so a
+            # multi-minute turn can't rack up enough GetHistoryRequest calls to
+            # trip Telegram's flood limit. Fast phase: 0.35s for the first 20s
+            # (~57 calls max). Slow phase: 1.5s thereafter.
+            elapsed = now - t_send
+            await asyncio.sleep(0.35 if elapsed < 20 else 1.5)
 
         reply = assemble_reply(collected, self._reply_mode)
-        logger.info("Reply from %s: %d message(s)", bot, sum(1 for v in collected.values() if v.strip()))
+        n = sum(1 for v in collected.values() if v.strip())
+        t_ret = loop.time()
+        think = (t_first_reply - t_send) if t_first_reply else (t_ret - t_send)
+        overhead = (t_ret - t_first_reply) if t_first_reply else 0.0
+        logger.info(
+            "Reply from %s: %d msg(s) | think=%.1fs detect_overhead=%.1fs total=%.1fs via=%s",
+            bot, n, think, overhead, t_ret - t_send, reason,
+        )
         return reply

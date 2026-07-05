@@ -185,6 +185,46 @@ HAL 9000 and Cyclops (both RVC) run behind a persistent background server
 listens on `/tmp/nova-rvc.sock`) so replies come back in a few seconds instead
 of reloading its ~350 MB of weights on every line.
 
+## Latency & loudness
+
+The round-trip was profiled end to end (`relay.py` logs `think`/
+`detect_overhead`/`total` per turn). The findings and what changed:
+
+- **TTS was the biggest Nova-side cost** — RVC voice conversion ran at ~1.3×
+  real-time on CPU (a ~5 s reply took ~6 s to synth). Two fixes cut it to
+  well under real-time:
+  - **RVC now runs on the GPU.** The `~/.nova/rvc` server loads its torch model
+    on **GPU 1** (never GPU 0 — that drives the display), pinned via
+    `CUDA_VISIBLE_DEVICES` so not even the CUDA context lands on GPU 0. It only
+    uses the GPU when GPU 1 has comfortable free VRAM (`NOVA_RVC_MIN_FREE_MB`,
+    default 2600) and **falls back to CPU** on any problem, so TTS never goes
+    down. Footprint is ~0.8 GB on GPU 1; the Q8 heretic's KV cache is
+    pre-allocated so it can't grow into that space. Overrides:
+    `NOVA_RVC_DEVICE` (`cpu` to force CPU), `NOVA_RVC_GPU` (physical index).
+  - **Pitch method `pm`** instead of `rmvpe` (~2× faster, inaudible difference
+    on the robotic voices; per-voice override `rvc_f0method` in the catalog).
+  - Net: ~6 s → ~1.6 s for a full sentence.
+- **Streaming synthesis.** Multi-sentence replies are synthesized chunk by
+  chunk and the first chunk starts playing while the rest are still being made,
+  so time-to-first-audio is ~one sentence, not the whole reply.
+- **Snappier reply detection.** The relay polls fast (0.35 s) while a turn is
+  fresh and returns the instant the 👀→👍 reaction flips (see below), backing
+  off to 1.5 s only for long tool-using turns (flood-limit safety). Cut the
+  detection tax from ~3 s to ~1.4 s.
+- **Louder.** The start/stop chimes were ~-28 dB (near inaudible) — reboosted
+  to ~-1 dB peak. Every spoken reply now passes through an EBU-R128 loudnorm
+  pass (`I=-14`) so speech is consistently loud without clipping.
+
+STT (Whisper) stays on **CPU** by default: at ~0.3 s it isn't the bottleneck,
+and GPU 1's free VRAM is better spent on the (20× slower) RVC voice. The
+GPU-aware STT watcher is restricted to **GPU 1 only** (`voice.gpu_dynamic.allowed_gpus`,
+default `[1]`) so it can opportunistically use the GPU if GPU 1 ever has real
+room, but will never touch the display GPU.
+
+What Nova can't fix: the agent's own think time (cloud DeepSeek for Pixel Bot,
+local Q8 for Jailbreak) — typically ~5 s warm, and a slow first turn after the
+gateway's been idle. That's server-side, and now dominates the round trip.
+
 ## Getting the real final answer, not a tool-call status bubble
 
 `relay.py` waits for the bot's Telegram messages to go quiet for `settle_s`

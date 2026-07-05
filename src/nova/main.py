@@ -220,6 +220,9 @@ class VoiceBridge:
                 active_poll_s=float(self.config.get("voice.gpu_dynamic.active_poll_s", 12)),
                 cooldown_poll_s=float(self.config.get("voice.gpu_dynamic.cooldown_poll_s", 300)),
                 gpu_compute_type=self.config.get("voice.gpu_dynamic.compute_type", "float16"),
+                # STT only ever uses these GPUs — default GPU 1 (never the
+                # display GPU 0). See gpu_monitor for the rationale.
+                allowed_gpus=self.config.get("voice.gpu_dynamic.allowed_gpus", [1]),
                 on_switch=_on_switch,
             )
             self.gpu_watcher.start()
@@ -429,7 +432,15 @@ class VoiceBridge:
                     time.sleep(0.1)
                 tts = self.tts_engines.get(agent)
                 if tts and self._running and epoch == self._speech_epoch:
-                    tts.speak(text, blocking=True)
+                    # Stream the reply; abort between chunks on shutdown or
+                    # barge-in (a new recording bumps _speech_epoch via
+                    # _flush_speech), so a long reply stops the instant the
+                    # user presses to talk again.
+                    tts.speak(
+                        text,
+                        blocking=True,
+                        should_continue=lambda: self._running and epoch == self._speech_epoch,
+                    )
             except Exception as e:
                 log(f"speech error ({agent}): {e}", "warn")
             finally:

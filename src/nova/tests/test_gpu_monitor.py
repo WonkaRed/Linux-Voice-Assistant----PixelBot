@@ -31,9 +31,11 @@ def _watcher(stt, free_by_gpu, load_mb=6144, unload_mb=3072, active_poll=0.2, co
     def fake_gpu_free_mb(index):
         return free_by_gpu.get(index)
 
-    def fake_best_gpu(min_free_mb):
+    def fake_best_gpu(min_free_mb, allowed_gpus=None):
         best_idx, best_free = None, -1.0
         for idx, free in free_by_gpu.items():
+            if allowed_gpus is not None and idx not in allowed_gpus:
+                continue
             if free is not None and free > best_free:
                 best_idx, best_free = idx, free
         return best_idx if best_idx is not None and best_free >= min_free_mb else None
@@ -42,7 +44,9 @@ def _watcher(stt, free_by_gpu, load_mb=6144, unload_mb=3072, active_poll=0.2, co
     gpu_monitor.best_gpu = fake_best_gpu
     return GPUWatcher(
         stt, threading.Lock(), load_threshold_mb=load_mb, unload_threshold_mb=unload_mb,
-        active_poll_s=active_poll, cooldown_poll_s=cooldown_poll, on_switch=on_switch or (lambda *a: None),
+        active_poll_s=active_poll, cooldown_poll_s=cooldown_poll,
+        allowed_gpus=list(free_by_gpu.keys()),  # let these tests exercise their mocked GPUs
+        on_switch=on_switch or (lambda *a: None),
     )
 
 
@@ -111,11 +115,11 @@ def test_switch_blocks_on_shared_lock_during_inflight_chunk():
     stt = FakeSTT()
     lock = threading.Lock()
     w = GPUWatcher(stt, lock, load_threshold_mb=6144, unload_threshold_mb=3072,
-                  active_poll_s=0.1, cooldown_poll_s=0.1)
+                  active_poll_s=0.1, cooldown_poll_s=0.1, allowed_gpus=[0])
 
     def fake_gpu_free_mb(index):
         return 8000
-    def fake_best_gpu(min_free_mb):
+    def fake_best_gpu(min_free_mb, allowed_gpus=None):
         return 0
     gpu_monitor.gpu_free_mb = fake_gpu_free_mb
     gpu_monitor.best_gpu = fake_best_gpu
@@ -133,12 +137,12 @@ def test_switch_blocks_on_shared_lock_during_inflight_chunk():
 def test_error_during_check_forces_cpu_fallback():
     stt = FakeSTT()
 
-    def boom(min_free_mb):
+    def boom(min_free_mb, allowed_gpus=None):
         raise RuntimeError("simulated nvml failure")
     gpu_monitor.best_gpu = boom
     gpu_monitor.gpu_free_mb = lambda i: None
 
-    w = GPUWatcher(stt, threading.Lock(), active_poll_s=0.1, cooldown_poll_s=0.1)
+    w = GPUWatcher(stt, threading.Lock(), active_poll_s=0.1, cooldown_poll_s=0.1, allowed_gpus=[0])
     stt.device = "cuda"  # pretend we were already resident on a GPU
     w.start()
     time.sleep(0.4)

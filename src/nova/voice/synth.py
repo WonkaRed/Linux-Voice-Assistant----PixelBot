@@ -18,6 +18,11 @@ _RVC_DIR = os.path.expanduser("~/.nova/rvc")
 _kokoro = None
 _piper_cache = {}
 
+# EBU-R128 loudness target for spoken replies. I=-14 LUFS is "streaming loud"
+# (louder than broadcast's -16/-23); TP=-1.0 leaves 1 dB of true-peak headroom
+# so the soft-limiter never hard-clips. Applied to every synth (see below).
+_LOUDNORM = "loudnorm=I=-14:TP=-1.0:LRA=11"
+
 
 def _kokoro_inst():
     global _kokoro
@@ -128,20 +133,27 @@ def synth_to_wav(entry: dict, text: str, out_path: str) -> str:
             "out_path": tmp,
             "base_voice": entry.get("rvc_base_voice", "am_onyx"),
             "base_speed": entry.get("rvc_base_speed", 0.92),
+            # Per-voice pitch method; the server defaults to the fast "pm" when
+            # unset. rmvpe is slower/higher-fidelity if a voice ever needs it.
+            "f0method": entry.get("rvc_f0method", "pm"),
         })
     else:
         raise ValueError(f"unknown TTS engine: {engine}")
 
+    # Always finish with a loudness pass so replies are consistently *loud* and
+    # present. Raw Kokoro/RVC output peaks near 0 dB but averages ~-20 dB (quiet
+    # speech with occasional peaks), so it sounds faint; EBU-R128 loudnorm lifts
+    # the perceived level to a streaming-loud target and soft-limits the peaks
+    # instead of clipping. Any per-voice ffmpeg `effect` chain runs first, then
+    # loudnorm. One ffmpeg call total, so it adds only a fraction of a second.
     effect = entry.get("effect")
-    if effect:
-        subprocess.run(
-            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", tmp, "-af", effect, out_path],
-            check=True, timeout=30,
-        )
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-    else:
-        os.replace(tmp, out_path)
+    af = f"{effect},{_LOUDNORM}" if effect else _LOUDNORM
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", tmp, "-af", af, out_path],
+        check=True, timeout=30,
+    )
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
     return out_path

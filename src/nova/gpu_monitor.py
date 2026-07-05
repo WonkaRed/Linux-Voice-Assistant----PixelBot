@@ -75,10 +75,23 @@ def gpu_count() -> int:
         return 0
 
 
-def best_gpu(min_free_mb: float) -> Optional[int]:
-    """Index of the GPU with the most free VRAM, if any meets the threshold."""
+def best_gpu(min_free_mb: float, allowed_gpus: Optional[list] = None) -> Optional[int]:
+    """Index of the GPU with the most free VRAM among ``allowed_gpus`` that
+    meets the threshold.
+
+    ``allowed_gpus`` restricts which GPUs STT may ever land on. It defaults to
+    ``[1]`` — GPU 0 drives the desktop display, so putting the STT model there
+    risks starving the compositor of VRAM (and crashing GUI windows), and the
+    Q8 heretic + RVC voice already share GPU 1. Cole's rule: prefer GPU 1, never
+    GPU 0. Pass an explicit list to override.
+    """
+    if allowed_gpus is None:
+        allowed_gpus = [1]
+    n = gpu_count()
     best_idx, best_free = None, -1.0
-    for i in range(gpu_count()):
+    for i in allowed_gpus:
+        if not (0 <= i < n):
+            continue
         free = gpu_free_mb(i)
         if free is not None and free > best_free:
             best_idx, best_free = i, free
@@ -102,6 +115,7 @@ class GPUWatcher:
         active_poll_s: float = 12.0,
         cooldown_poll_s: float = 300.0,
         gpu_compute_type: str = "float16",
+        allowed_gpus: Optional[list] = None,
         on_switch: Optional[Callable[[str, str], None]] = None,
     ):
         """
@@ -139,6 +153,11 @@ class GPUWatcher:
         self.active_poll_s = active_poll_s
         self.cooldown_poll_s = cooldown_poll_s
         self.gpu_compute_type = gpu_compute_type
+        # STT may only ever land on these GPUs. Default [1]: never the display
+        # GPU 0 (whose VRAM the desktop compositor needs), and GPU 1 already
+        # hosts Q8 + the RVC voice, so STT loads there only when there's real
+        # room (see load_threshold_mb) and evicts the moment it gets tight.
+        self.allowed_gpus = [1] if allowed_gpus is None else list(allowed_gpus)
         self.on_switch = on_switch or (lambda *a: None)
 
         self._running = False
@@ -187,13 +206,13 @@ class GPUWatcher:
 
     def _check_and_switch(self) -> None:
         if self.stt.device != "cuda":
-            idx = best_gpu(self.load_threshold_mb)
+            idx = best_gpu(self.load_threshold_mb, self.allowed_gpus)
             if idx is None:
                 return  # stay on CPU, nothing to do
             with self.lock:
                 # Re-check inside the lock: the world may have moved between
                 # the check above and actually acquiring it a moment later.
-                idx = best_gpu(self.load_threshold_mb)
+                idx = best_gpu(self.load_threshold_mb, self.allowed_gpus)
                 if idx is None or self.stt.device == "cuda":
                     return
                 if self.stt.switch_device("cuda", device_index=idx, compute_type=self.gpu_compute_type):
