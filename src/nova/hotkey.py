@@ -23,11 +23,17 @@ class SocketCommandListener:
     Listen for toggle commands over a Unix socket (Wayland-compatible).
 
     A command is an agent name (e.g. "pixelbot", "jailbreak") which toggles that
-    agent's recording, plus the control words "stop", "status", "ping".
+    agent's recording, plus the control words "stop", "status", "ping". A longer
+    ``ask <agent> <text>`` command runs a one-shot text turn on the daemon's
+    *already-connected* relay and returns the reply — this is how `nova ask`
+    reaches the agent without opening a second Telethon client on the shared
+    session file (which would drop the daemon's own Telegram connection).
     """
 
-    def __init__(self, on_toggle: Callable[[str], None], agents: list):
+    def __init__(self, on_toggle: Callable[[str], None], agents: list,
+                 on_ask: Optional[Callable[[str, str], str]] = None):
         self.on_toggle = on_toggle
+        self.on_ask = on_ask
         self.agents = set(agents)
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -55,35 +61,64 @@ class SocketCommandListener:
             return False
 
     def _loop(self) -> None:
+        # One thread per connection so a long-running `ask` (which blocks until
+        # the agent replies) never stalls a concurrent F8/F4 toggle.
         while self._running:
             try:
                 conn, _ = self._socket.accept()
-                conn.settimeout(1.0)
-                try:
-                    data = conn.recv(256).decode("utf-8").strip().lower()
-                    if data in self.agents:
-                        self.on_toggle(data)
-                        conn.sendall(f"OK: {data} toggled\n".encode())
-                    elif data == "stop":
-                        self.on_toggle("__stop__")
-                        conn.sendall(b"OK: stop\n")
-                    elif data == "status":
-                        conn.sendall(b"OK: nova running\n")
-                    elif data == "ping":
-                        conn.sendall(b"pong\n")
-                    else:
-                        conn.sendall(
-                            f"ERROR: unknown command '{data}' (agents: {', '.join(sorted(self.agents))})\n".encode()
-                        )
-                except socket.timeout:
-                    pass
-                finally:
-                    conn.close()
             except socket.timeout:
                 continue
             except Exception as e:
                 if self._running and DEBUG:
-                    logger.warning("Socket error: %s", e)
+                    logger.warning("Socket accept error: %s", e)
+                continue
+            threading.Thread(target=self._serve_conn, args=(conn,), daemon=True).start()
+
+    def _serve_conn(self, conn: socket.socket) -> None:
+        try:
+            conn.settimeout(2.0)
+            try:
+                raw = conn.recv(65536).decode("utf-8", "replace").strip()
+            except socket.timeout:
+                return
+            low = raw.lower()
+
+            if low.startswith("ask ") and self.on_ask:
+                # `ask <agent> <text>` — keep the text's original case.
+                rest = raw[4:].strip()
+                agent, _, text = rest.partition(" ")
+                agent, text = agent.strip().lower(), text.strip()
+                if agent in self.agents and text:
+                    conn.settimeout(None)  # the agent turn can take a while
+                    try:
+                        reply = self.on_ask(agent, text) or ""
+                    except Exception as e:
+                        reply = f"ERROR: {e}"
+                    conn.sendall(reply.encode("utf-8", "replace"))
+                else:
+                    conn.sendall(b"ERROR: usage: ask <agent> <text>\n")
+            elif low in self.agents:
+                self.on_toggle(low)
+                conn.sendall(f"OK: {low} toggled\n".encode())
+            elif low == "stop":
+                self.on_toggle("__stop__")
+                conn.sendall(b"OK: stop\n")
+            elif low == "status":
+                conn.sendall(b"OK: nova running\n")
+            elif low == "ping":
+                conn.sendall(b"pong\n")
+            else:
+                conn.sendall(
+                    f"ERROR: unknown command '{raw[:40]}' (agents: {', '.join(sorted(self.agents))})\n".encode()
+                )
+        except Exception as e:
+            if self._running and DEBUG:
+                logger.warning("Socket serve error: %s", e)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     def stop(self) -> None:
         self._running = False

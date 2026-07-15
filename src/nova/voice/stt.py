@@ -145,10 +145,22 @@ class STTEngine:
                 initial_prompt="Voice command transcription.",  # Helps model understand context
             )
 
-            # Collect text
-            text = " ".join([segment.text for segment in segments]).strip()
+            # Drop segments Whisper itself flags as non-speech. On an empty or
+            # near-silent take (e.g. an accidental double-press of F8, or ambient
+            # room noise) Whisper otherwise invents a plausible phrase — "Thank
+            # you.", "We made it.", "I'll see you next time." — which we'd then
+            # send to the agent as a real turn. no_speech_prob is the model's own
+            # "there's no speech here" signal; real speech sits far below the
+            # conservative 0.8 cutoff, so this never drops a genuine utterance.
+            seg_list = list(segments)
+            max_no_speech = max((getattr(s, "no_speech_prob", 0.0) for s in seg_list), default=0.0)
+            speech_segs = [s for s in seg_list if getattr(s, "no_speech_prob", 0.0) <= 0.8]
+            if seg_list and not speech_segs:
+                logger.warning(f"Dropped non-speech audio (no_speech_prob={max_no_speech:.2f})")
+            text = " ".join(s.text for s in speech_segs).strip()
 
-            # Filter out hallucinations (model sometimes returns the prompt when there's no speech)
+            # Second net: fixed phrases the model returns verbatim on silence
+            # (the seeded prompt, common filler) even when it isn't flagged.
             hallucinations = [
                 "voice command transcription",
                 "voice command transcription.",

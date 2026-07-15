@@ -124,18 +124,32 @@ def assemble_reply(collected: dict, mode: str = "last", anchored_ids=None) -> st
     if not nonempty:
         return ""
 
+    def _spoken(indices, join_all: bool) -> str:
+        if not indices:
+            return ""
+        if join_all or mode == "concat":
+            raw = "\n\n".join(collected[i].strip() for i in indices)
+        else:
+            raw = collected[indices[-1]]
+        return sanitize_for_voice(raw)
+
+    # 1) Reply-anchored messages are the real answer (join all — split-safe).
     anchored = [i for i in nonempty
                 if anchored_ids and i in anchored_ids and not _is_tool_bubble(collected[i])]
-    if anchored:
-        text = "\n\n".join(collected[i].strip() for i in anchored)
-    else:
-        content = [i for i in nonempty if not is_agent_noise(collected[i])]
-        if content:
-            text = (collected[content[-1]] if mode == "last"
-                    else "\n\n".join(collected[i].strip() for i in content)).strip()
-        else:
-            text = collected[nonempty[-1]].strip()
-    return sanitize_for_voice(text)
+    spoken = _spoken(anchored, join_all=True)
+    if spoken:
+        return spoken
+    # (anchored may sanitize to empty — e.g. a message that was only tool-call
+    #  XML — so fall through rather than speaking nothing.)
+
+    # 2) No usable anchor: strip tool/status noise, keep prose per mode.
+    content = [i for i in nonempty if not is_agent_noise(collected[i])]
+    spoken = _spoken(content, join_all=False)
+    if spoken:
+        return spoken
+
+    # 3) Never go silent: speak the last non-empty message as-is.
+    return sanitize_for_voice(collected[nonempty[-1]]) or collected[nonempty[-1]].strip()
 
 
 class TelegramRelay:

@@ -300,7 +300,9 @@ class VoiceBridge:
         from nova.hotkey import SocketCommandListener, HotkeyListener
 
         agents = self.config.agent_names
-        self.socket_listener = SocketCommandListener(on_toggle=self._toggle, agents=agents)
+        self.socket_listener = SocketCommandListener(
+            on_toggle=self._toggle, agents=agents, on_ask=self._socket_ask
+        )
         if self.socket_listener.start():
             hint = " | ".join(f"nova-toggle {a}" for a in agents)
             log(f"Socket ready: {hint}", "info")
@@ -577,10 +579,11 @@ class VoiceBridge:
                 break
         self._cleanup()
 
-    def _send_text(self, agent, msg):
+    def _send_text(self, agent, msg) -> str:
+        """Send text to an agent on the live relay, speak the reply, return it."""
         if not self.relay or not self.relay.connected:
             log("Relay not connected — run nova login", "err")
-            return
+            return "ERROR: relay not connected"
         try:
             bot = self.config.agent(agent)["bot"]
             timeout = float(self.config.agent(agent).get("reply_timeout_s", 180))
@@ -588,8 +591,18 @@ class VoiceBridge:
             reply = self.relay.ask(bot, msg, timeout=timeout)
             log(f"[{agent}] reply: {reply[:200]}", "ok")
             self._speak(agent, reply)
+            return reply or ""
         except Exception as e:
             log(f"[{agent}] error: {e}", "err")
+            return f"ERROR: {e}"
+
+    def _socket_ask(self, agent, text) -> str:
+        """Serve a `nova ask` routed over the socket: run it on THIS daemon's
+        already-connected relay (no second Telethon session) and return the reply."""
+        if agent not in self.config.agent_names:
+            return f"ERROR: unknown agent '{agent}'"
+        log(f"[{agent}] ask via socket: {text[:80]}", "info")
+        return self._send_text(agent, self._apply_command_prefix(text))
 
     def _handle_cmd(self, cmd):
         parts = cmd.lower().split()
@@ -761,6 +774,72 @@ def _voice_picker(config, agent=None):
     print("done.")
 
 
+def _daemon_is_up() -> bool:
+    """True if the Nova systemd user service is active (it owns the session)."""
+    try:
+        import subprocess
+        return subprocess.run(
+            ["systemctl", "--user", "is-active", "--quiet", "nova.service"]
+        ).returncode == 0
+    except Exception:
+        return False
+
+
+def _ask_over_socket(agent: str, text: str):
+    """Send one `ask` over the daemon socket. Returns (reply, connected).
+    ``connected`` is False when nothing is listening (stale/absent socket)."""
+    import socket as _socket
+
+    path = os.environ.get("NOVA_SOCKET", "/tmp/nova-voice.sock")
+    if not os.path.exists(path):
+        return None, False
+    c = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    try:
+        c.settimeout(5)
+        c.connect(path)          # ConnectionRefused => stale socket, no listener
+    except OSError:
+        c.close()
+        return None, False
+    try:
+        c.sendall(f"ask {agent} {text}".encode("utf-8"))
+        c.shutdown(_socket.SHUT_WR)   # signal end-of-request
+        c.settimeout(600)
+        chunks = []
+        while True:
+            b = c.recv(65536)
+            if not b:
+                break
+            chunks.append(b)
+        return b"".join(chunks).decode("utf-8", "replace").strip(), True
+    finally:
+        c.close()
+
+
+def _ask_via_daemon(agent: str, text: str) -> "Optional[str]":
+    """Route `nova ask` through the running daemon's live relay. Returns the
+    reply, or None only when there is genuinely no daemon (caller then runs a
+    safe standalone one-shot).
+
+    This is what keeps `nova ask` from opening a second Telethon client on the
+    shared session file — which locks the SQLite session and drops the daemon's
+    own Telegram connection (breaking F8 until a restart). If the daemon service
+    is up but its socket isn't reachable yet (it binds only after model load),
+    we wait for it rather than falling back to a conflicting standalone session.
+    """
+    reply, connected = _ask_over_socket(agent, text)
+    if connected:
+        return reply
+    if _daemon_is_up():
+        for _ in range(20):        # ~10s for the daemon's socket to come up
+            time.sleep(0.5)
+            reply, connected = _ask_over_socket(agent, text)
+            if connected:
+                return reply
+        return ("ERROR: Nova daemon is running but its command socket isn't "
+                "reachable yet — try again in a moment.")
+    return None                    # no daemon → standalone is safe
+
+
 def main():
     import argparse
     from nova.config import Config
@@ -791,6 +870,14 @@ def main():
         _voice_picker(config, agent=args.agent)
         return
     if args.cmd == "ask":
+        message = " ".join(args.message)
+        # Prefer the running daemon so we never open a second Telethon session
+        # on the shared file (which would drop the daemon's Telegram connection).
+        routed = _ask_via_daemon(args.agent, message)
+        if routed is not None:
+            print(routed)
+            return
+        # No daemon listening — safe to run a standalone one-shot.
         bridge = VoiceBridge(config)
         bridge._connect_relay()
         if not bridge.relay:
@@ -798,7 +885,8 @@ def main():
         bridge._load_models(with_stt=False)  # text-only path needs just TTS
         bridge._running = True
         bridge._start_speech_worker()
-        bridge._send_text(args.agent, " ".join(args.message))
+        reply = bridge._send_text(args.agent, message)
+        print(reply)
         # wait for the reply to finish speaking
         tts = bridge.tts_engines.get(args.agent)
         for _ in range(1200):

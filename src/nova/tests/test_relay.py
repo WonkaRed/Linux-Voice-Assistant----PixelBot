@@ -93,6 +93,20 @@ def test_gate_drops_anchored_tool_bubble():
     assert assemble_reply(collected, "last", anchored_ids={101, 102}) == ANSWER
 
 
+def test_gate_anchored_pure_xml_falls_back_to_content():
+    # An anchored message that is only tool-call XML sanitizes to empty — the
+    # gate must fall through to real content rather than going silent.
+    xml_only = "<tool_call>\n<function=terminal>\n</function>\n</tool_call>"
+    collected = {50: xml_only, 51: "The real answer."}
+    assert assemble_reply(collected, "last", anchored_ids={50}) == "The real answer."
+
+
+def test_gate_never_silent_even_if_everything_sanitizes_empty():
+    xml_only = "<tool_call></tool_call>"
+    # Only message is empty-after-sanitize → returns it raw rather than "".
+    assert assemble_reply({50: xml_only}, "last", anchored_ids={50}) == xml_only
+
+
 def test_sanitize_strips_leaked_tool_call_xml():
     leaked = (
         "Alright bro, let me just grab that full track!\n\n"
