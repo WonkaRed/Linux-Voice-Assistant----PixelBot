@@ -1,6 +1,12 @@
 import pytest
 
-from nova.relay import assemble_reply, ReactionTracker, TelegramRelay
+from nova.relay import (
+    assemble_reply,
+    is_agent_noise,
+    sanitize_for_voice,
+    ReactionTracker,
+    TelegramRelay,
+)
 
 
 def test_assemble_last_picks_final_message():
@@ -27,6 +33,77 @@ def test_assemble_empty():
 def test_reply_mode_validated():
     with pytest.raises(ValueError):
         TelegramRelay(api_id=1, api_hash="x", session="/tmp/x.session", reply_mode="bogus")
+
+
+# ---------------------------------------------------------------- TTS gate
+# Real message shapes captured from a live @JailbrokenAgentBot turn.
+TOOL_BUBBLE = '💻 terminal: "hostname && ps aux --sort=-%mem | hea..."'
+SKILL_BUBBLE = '📚 skill_view: "substance-prep"'
+ITERATION = "⏳ Still working... (9 min elapsed — iteration 6/90, waiting for provider response (streaming))"
+GW_WARNING = "⚠️ Gateway shutting down — Your current task will be interrupted."
+SELF_IMPROVE = "💾 Self-improvement review: Skill 'music-search-download' created."
+ANSWER = "I'm on pop-os (this desktop), and the top two memory hogs are Nova dictation daemon at 2.8 GB and the RVC server at 2.6 GB."
+
+
+def test_is_agent_noise_classifies_hermes_chatter():
+    assert is_agent_noise(TOOL_BUBBLE)
+    assert is_agent_noise(SKILL_BUBBLE)
+    assert is_agent_noise(ITERATION)
+    assert is_agent_noise(GW_WARNING)
+    assert is_agent_noise(SELF_IMPROVE)
+    assert is_agent_noise("💻 terminal...")           # no-preview variant
+    assert is_agent_noise("")                          # empty
+    # A multi-line progress bubble is entirely tool lines.
+    assert is_agent_noise(f"{TOOL_BUBBLE}\n{SKILL_BUBBLE}")
+
+
+def test_is_agent_noise_keeps_real_answers():
+    assert not is_agent_noise(ANSWER)
+    assert not is_agent_noise("See you later, bro.")
+    # Prose that merely starts with an emoji is not a tool line.
+    assert not is_agent_noise("✅ Done — freed 2 GB of RAM by killing the leaked worker.")
+
+
+def test_gate_prefers_anchored_answer_over_tool_and_status():
+    # baseline=100 (our message); the answer replies to it, chatter doesn't.
+    collected = {101: TOOL_BUBBLE, 102: ITERATION, 103: ANSWER, 104: GW_WARNING}
+    assert assemble_reply(collected, "last", anchored_ids={103}) == ANSWER
+
+
+def test_gate_joins_split_anchored_answer():
+    collected = {101: TOOL_BUBBLE, 102: "First half.", 103: "Second half."}
+    assert assemble_reply(collected, "last", anchored_ids={102, 103}) == "First half.\n\nSecond half."
+
+
+def test_gate_fallback_strips_noise_when_no_anchor():
+    # No reply-anchor available (e.g. TELEGRAM_REACTIONS off, older gateway).
+    collected = {101: TOOL_BUBBLE, 102: ITERATION, 103: ANSWER}
+    assert assemble_reply(collected, "last") == ANSWER
+
+
+def test_gate_never_goes_silent_on_all_noise():
+    # Pathological: only chatter arrived — speak the last thing rather than nothing.
+    collected = {101: TOOL_BUBBLE, 102: ITERATION}
+    assert assemble_reply(collected, "last") == ITERATION
+
+
+def test_gate_drops_anchored_tool_bubble():
+    # Defense-in-depth: even if a tool bubble were reply-anchored, it's not spoken.
+    collected = {101: TOOL_BUBBLE, 102: ANSWER}
+    assert assemble_reply(collected, "last", anchored_ids={101, 102}) == ANSWER
+
+
+def test_sanitize_strips_leaked_tool_call_xml():
+    leaked = (
+        "Alright bro, let me just grab that full track!\n\n"
+        "<tool_call>\n<function=terminal>\n<parameter=command>\n"
+        'curl -s "https://example/api"\n</parameter>\n</function>\n</tool_call>'
+    )
+    assert sanitize_for_voice(leaked) == "Alright bro, let me just grab that full track!"
+    # Applied through the gate on an anchored answer too.
+    assert assemble_reply({50: leaked}, "last", anchored_ids={50}) == (
+        "Alright bro, let me just grab that full track!"
+    )
 
 
 # ---------------------------------------------------------------------- ReactionTracker

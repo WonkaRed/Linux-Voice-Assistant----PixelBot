@@ -12,6 +12,7 @@ synchronous ``ask()`` from any thread.
 """
 import asyncio
 import logging
+import re
 import threading
 from typing import Optional
 
@@ -61,17 +62,80 @@ class ReactionTracker:
         return self.done
 
 
-def assemble_reply(collected: dict, mode: str = "last") -> str:
-    """
-    Turn the {message_id: text} map gathered from the bot into one reply string.
+# --- TTS gate: what Hermes posts to Telegram vs. what should be *spoken* -------
+# A single Hermes turn posts several messages to the chat: tool-progress bubbles
+# ("💻 terminal: …"), iteration/status lines ("⏳ Still working… iteration 6/90"),
+# lifecycle notices ("⚠️ Gateway shutting down…", "💾 Self-improvement review: …"),
+# and finally the assistant's actual answer. All of it stays in the Telegram
+# thread; only the answer should be read aloud. Two signals separate the answer
+# from the chatter, strongest first:
+#   1. Structural — the Hermes gateway delivers the real answer as a *reply to
+#      the user's message* (reply_to == the id we sent). Every progress/status
+#      message is standalone (reply_to is None). Verified across live turns.
+#   2. Textual — a fallback for turns with no reply-anchor: progress bubbles are
+#      entirely "<glyph> tool_name: …" lines; status lines start with a known
+#      lifecycle glyph. Used only when no anchored answer is present.
+# We also strip any raw <tool_call> XML a model occasionally leaks into its prose.
+_STATUS_PREFIXES = ("⏳", "⚠️", "⚠", "💾", "📦", "⟳", "⏱️", "⏱")
+_TOOL_LINE_RE = re.compile(r"^\s*[^\w\s\"'([{]{1,4}\s+[a-z][a-z0-9_]{1,40}\s*(?::\s|\.{3}|…|\().*$")
+_TOOLCALL_XML_RE = re.compile(r"<tool_call>.*?</tool_call>", re.S | re.I)
+_FUNCTION_XML_RE = re.compile(r"<function=[^>]*>.*?(?:</function>|\Z)", re.S | re.I)
+_STRAY_TAG_RE = re.compile(r"</?(?:tool_call|function|parameter)(?:=[^>]*)?>", re.I)
 
-    ``last``   → the final message (robust against interim status messages).
-    ``concat`` → all non-empty messages joined in id order (for split answers).
+
+def _is_tool_bubble(text: str) -> bool:
+    """True if every non-empty line is a Hermes tool-progress line ("💻 terminal: …")."""
+    lines = [ln for ln in text.strip().splitlines() if ln.strip()]
+    return bool(lines) and all(_TOOL_LINE_RE.match(ln) for ln in lines)
+
+
+def is_agent_noise(text: str) -> bool:
+    """True if a message is tool-progress or lifecycle/status chatter, not an answer."""
+    s = text.strip()
+    if not s:
+        return True
+    if s.startswith(_STATUS_PREFIXES):
+        return True
+    return _is_tool_bubble(s)
+
+
+def sanitize_for_voice(text: str) -> str:
+    """Strip tool-call XML a model sometimes leaks inline, then tidy whitespace."""
+    text = _TOOLCALL_XML_RE.sub("", text)
+    text = _FUNCTION_XML_RE.sub("", text)
+    text = _STRAY_TAG_RE.sub("", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def assemble_reply(collected: dict, mode: str = "last", anchored_ids=None) -> str:
     """
-    parts = [collected[i].strip() for i in sorted(collected) if collected[i].strip()]
-    if not parts:
+    Turn the {message_id: text} map gathered from the bot into the string to
+    *speak*. Tool-progress, iteration and lifecycle messages are gated out here
+    — they stay in the Telegram thread; this only decides what TTS reads.
+
+    Selection, strongest signal first:
+      • messages replying to our trigger (``anchored_ids``) — the real answer,
+        joined in id order so a long answer split across messages stays whole;
+      • else non-noise messages, per ``mode`` (``last`` / ``concat``);
+      • else, to never go silent, the last non-empty message as-is.
+    """
+    ids = sorted(collected)
+    nonempty = [i for i in ids if collected[i].strip()]
+    if not nonempty:
         return ""
-    return parts[-1] if mode == "last" else "\n\n".join(parts)
+
+    anchored = [i for i in nonempty
+                if anchored_ids and i in anchored_ids and not _is_tool_bubble(collected[i])]
+    if anchored:
+        text = "\n\n".join(collected[i].strip() for i in anchored)
+    else:
+        content = [i for i in nonempty if not is_agent_noise(collected[i])]
+        if content:
+            text = (collected[content[-1]] if mode == "last"
+                    else "\n\n".join(collected[i].strip() for i in content)).strip()
+        else:
+            text = collected[nonempty[-1]].strip()
+    return sanitize_for_voice(text)
 
 
 class TelegramRelay:
@@ -209,6 +273,16 @@ class TelegramRelay:
         return self._entity_cache[bot]
 
     @staticmethod
+    def _reply_to_id(msg):
+        """The message id this message replies to, or None. Handles both the
+        legacy ``reply_to_msg_id`` attribute and the newer ``reply_to`` header."""
+        rid = getattr(msg, "reply_to_msg_id", None)
+        if rid is not None:
+            return rid
+        header = getattr(msg, "reply_to", None)
+        return getattr(header, "reply_to_msg_id", None) if header else None
+
+    @staticmethod
     def _reaction_emojis_of(msg) -> set:
         """Emoji currently on a Telethon message, or {} if it has none."""
         reactions = getattr(msg, "reactions", None)
@@ -231,10 +305,22 @@ class TelegramRelay:
         t_send = loop.time()
         deadline = t_send + timeout
         collected: dict = {}      # msg_id -> latest text
+        anchored_ids: set = set()  # ids replying to our trigger = the real answer
         last_change: Optional[float] = None
         reactions = ReactionTracker()
-        t_first_reply: Optional[float] = None   # when the bot's first text landed
+        t_first_reply: Optional[float] = None   # when the real answer first landed
         reason = "?"
+
+        def answer_present() -> bool:
+            # A real, speakable answer exists — an anchored reply, or (fallback)
+            # any non-noise message. Tool bubbles / status lines don't count, so
+            # the settle window can't fire on a transient "💻 terminal: …" bubble.
+            for i, body in collected.items():
+                if not body.strip():
+                    continue
+                if i in anchored_ids and not _is_tool_bubble(body):
+                    return True
+            return any(v.strip() and not is_agent_noise(v) for v in collected.values())
 
         while True:
             # Re-read everything from our own message onward in one call:
@@ -253,27 +339,30 @@ class TelegramRelay:
                 if collected.get(msg.id) != body:
                     collected[msg.id] = body
                     last_change = loop.time()
+                if self._reply_to_id(msg) == baseline:
+                    anchored_ids.add(msg.id)
 
             now = loop.time()
-            have_reply = any(v.strip() for v in collected.values())
-            if have_reply and t_first_reply is None:
+            have_any = any(v.strip() for v in collected.values())
+            have_answer = answer_present()
+            if have_answer and t_first_reply is None:
                 t_first_reply = now
 
-            if have_reply and reactions.done:
+            if have_any and reactions.done:
                 # Authoritative: Hermes only sets the terminal reaction after
                 # every send for this turn has already completed. This lets us
                 # return the instant the turn is really done instead of waiting
                 # out the settle window.
                 reason = "reaction"
                 break
-            if have_reply and last_change is not None and (now - last_change) >= self._settle_s:
+            if have_answer and last_change is not None and (now - last_change) >= self._settle_s:
                 # Fallback when reactions aren't available (TELEGRAM_REACTIONS
-                # off, or the bot can't react in this chat): the answer has been
-                # quiet for settle_s, treat it as done.
+                # off, or the bot can't react in this chat): the *answer* (not a
+                # tool bubble) has been quiet for settle_s, treat it as done.
                 reason = "settle"
                 break
             if now >= deadline:
-                if have_reply:
+                if have_any:
                     logger.warning("Reply timeout hit; returning what we have")
                     reason = "timeout"
                     break
@@ -288,13 +377,15 @@ class TelegramRelay:
             elapsed = now - t_send
             await asyncio.sleep(0.35 if elapsed < 20 else 1.5)
 
-        reply = assemble_reply(collected, self._reply_mode)
+        reply = assemble_reply(collected, self._reply_mode, anchored_ids)
         n = sum(1 for v in collected.values() if v.strip())
+        n_gated = n - sum(1 for i, v in collected.items()
+                          if v.strip() and (i in anchored_ids or not is_agent_noise(v)))
         t_ret = loop.time()
         think = (t_first_reply - t_send) if t_first_reply else (t_ret - t_send)
         overhead = (t_ret - t_first_reply) if t_first_reply else 0.0
         logger.info(
-            "Reply from %s: %d msg(s) | think=%.1fs detect_overhead=%.1fs total=%.1fs via=%s",
-            bot, n, think, overhead, t_ret - t_send, reason,
+            "Reply from %s: %d msg(s), %d gated from TTS | think=%.1fs detect_overhead=%.1fs total=%.1fs via=%s",
+            bot, n, n_gated, think, overhead, t_ret - t_send, reason,
         )
         return reply
